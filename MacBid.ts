@@ -62,8 +62,8 @@ export interface MacBidApiResponse extends Response {
 }
 
 export class MacBid {
-  public LOGIN_PAGE_URL = "https://www.mac.bid/";
-  public API_ROOT = "https://api.macdiscount.com/";
+  public LOGIN_PAGE_URL = "https://www.mac.bid";
+  public API_ROOT = "https://api.macdiscount.com";
 
   private macbid_session_headers: { [key: string]: string } = {
     "Content-Type": "application/json",
