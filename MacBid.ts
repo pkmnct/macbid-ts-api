@@ -55,13 +55,13 @@ export enum ConditionName {
   OpenBox = "OPEN BOX",
 }
 
-export interface ShopgoodwillApiResponse extends Response {
+export interface MacBidApiResponse extends Response {
   json: () => Promise<{
     [key: string]: unknown;
   }>;
 }
 
-export class Shopgoodwill {
+export class MacBid {
   public LOGIN_PAGE_URL = "https://www.mac.bid/";
   public API_ROOT = "https://api.macdiscount.com/";
 
@@ -90,22 +90,22 @@ export class Shopgoodwill {
     }
   };
 
-  public get = async (path: string): Promise<ShopgoodwillApiResponse> =>
+  public get = async (path: string): Promise<MacBidApiResponse> =>
     (await fetch(this.API_ROOT + path, {
       headers: this.macbid_session_headers,
-    })) as ShopgoodwillApiResponse;
+    })) as MacBidApiResponse;
 
   public post = async (
     path: string,
     options?: RequestInit
-  ): Promise<ShopgoodwillApiResponse> =>
+  ): Promise<MacBidApiResponse> =>
     (await fetch(this.API_ROOT + path, {
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore
       headers: this.macbid_session_headers,
       method: "POST",
       ...options,
-    })) as ShopgoodwillApiResponse;
+    })) as MacBidApiResponse;
 
   /**
    * Raise an exception if an endpoint requiring login is called without valid auth
@@ -158,4 +158,4 @@ export class Shopgoodwill {
   };
 }
 
-export default Shopgoodwill;
+export default MacBid;
