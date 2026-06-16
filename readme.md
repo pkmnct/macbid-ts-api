@@ -65,6 +65,9 @@ For JSON storage, use `MacBid.serializeAuthState` / `MacBid.parseAuthState`.
 |---|---|
 | `authenticate(params?)` | Log in or refresh session; returns persistable state |
 | `get_watchlist()` | Active watchlist items |
+| `get_active()` | Active won items (e.g. awaiting pickup) |
+| `get_buildings()` | Warehouse buildings |
+| `get_locations()` | Pickup locations |
 | `get(path)` / `post(path, options?)` | Authenticated API requests |
 | `refreshToken()` | Refresh the access token |
 | `getAuthState()` | Current persistable state |
