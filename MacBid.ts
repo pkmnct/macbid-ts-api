@@ -1,6 +1,5 @@
 import fetch, { Response } from "node-fetch";
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
 
 export interface AuthInfo {
   email?: string;
@@ -12,8 +11,16 @@ export interface AuthInfo {
   refresh_token_expiration?: Date;
   validation_code?: string;
   device_id?: string;
-  /** True when a 2FA code was sent and we're waiting for the user to provide it */
-  pending_2fa?: boolean;
+}
+
+/** JSON-serializable auth fields safe to persist (no credentials). */
+export interface SerializableAuthState {
+  token?: string;
+  refresh_token?: string;
+  token_expiration?: string;
+  refresh_token_expiration?: string;
+  user_id?: string;
+  device_id?: string;
 }
 
 export interface WatchlistFull {
@@ -77,56 +84,124 @@ export class MacBid {
   private macbid_session_headers: { [key: string]: string } = {
     "Content-Type": "application/json",
   };
-  private auth_info: AuthInfo;
-  private tokenFilePath?: string;
+  private auth_info: AuthInfo = {};
 
-  constructor(auth_info: AuthInfo, tokenFilePath?: string) {
-    this.auth_info = auth_info;
-    this.tokenFilePath = tokenFilePath;
-    if (tokenFilePath) {
-      console.log("MacBid initialized with token file path:", tokenFilePath);
-    } else {
-      console.log("MacBid initialized without token file path");
+  private mergeAuthInfo = (params: Partial<AuthInfo>): void => {
+    Object.assign(this.auth_info, params);
+  };
+
+  /** Returns persistable auth state (tokens and device_id). */
+  public getAuthState = (): SerializableAuthState => {
+    return MacBid.serializeAuthState(this.auth_info);
+  };
+
+  public static serializeAuthState = (
+    authInfo: Partial<AuthInfo>
+  ): SerializableAuthState => ({
+    token: authInfo.token,
+    refresh_token: authInfo.refresh_token,
+    token_expiration: authInfo.token_expiration?.toISOString(),
+    refresh_token_expiration: authInfo.refresh_token_expiration?.toISOString(),
+    user_id: authInfo.user_id,
+    device_id: authInfo.device_id,
+  });
+
+  public static parseAuthState = (
+    data: string | SerializableAuthState
+  ): Partial<AuthInfo> => {
+    const parsed =
+      typeof data === "string"
+        ? (JSON.parse(data) as SerializableAuthState)
+        : data;
+
+    return {
+      token: parsed.token,
+      refresh_token: parsed.refresh_token,
+      token_expiration: parsed.token_expiration
+        ? new Date(parsed.token_expiration)
+        : undefined,
+      refresh_token_expiration: parsed.refresh_token_expiration
+        ? new Date(parsed.refresh_token_expiration)
+        : undefined,
+      user_id: parsed.user_id,
+      device_id: parsed.device_id,
+    };
+  };
+
+  private clearLoginSession = (): void => {
+    delete this.auth_info.token;
+    delete this.auth_info.refresh_token;
+    delete this.auth_info.token_expiration;
+    delete this.auth_info.refresh_token_expiration;
+    delete this.auth_info.user_id;
+    delete this.auth_info.device_id;
+    delete this.auth_info.validation_code;
+    delete this.macbid_session_headers["Authorization"];
+  };
+
+  /** device_id saved without tokens means an SMS was sent and we're waiting for the code. */
+  private isAwaiting2FA = (): boolean => {
+    return !!(
+      this.auth_info.device_id &&
+      !this.auth_info.token &&
+      !this.auth_info.refresh_token
+    );
+  };
+
+  /**
+   * Establish or refresh a session. Pass credentials and any saved tokens / device_id.
+   * Omit params on later calls to reuse the current session.
+   * Returns persistable auth state; use getAuthState() after API calls that may refresh tokens.
+   */
+  public authenticate = async (
+    params?: Partial<AuthInfo>
+  ): Promise<SerializableAuthState> => {
+    if (params) {
+      this.mergeAuthInfo(params);
     }
-    // Don't authenticate in constructor - wait until actually needed
-  }
 
-  public authenticate = async () => {
-    if (this.auth_info) {
-      // If we have a token, use it (will be auto-refreshed if expired)
-      if (this.auth_info.token) {
-        this.macbid_session_headers["Authorization"] = this.auth_info
-          .token as string;
+    if (this.auth_info.token) {
+      this.macbid_session_headers["Authorization"] = this.auth_info.token;
+      if (!this.isTokenExpired()) {
         console.log("Using existing access token");
-        // Token will be auto-refreshed by ensureValidToken if needed
-        return;
+        return this.getAuthState();
       }
-      
-      // If we have a refresh token but no access token, try to refresh first
-      if (this.auth_info.refresh_token) {
-        if (this.isRefreshTokenExpired()) {
-          console.log("Refresh token has expired, need to login");
-        } else {
-          console.log("No access token, attempting to refresh using refresh token");
-          try {
-            await this.refreshToken();
-            console.log("Successfully refreshed token");
-            return;
-          } catch (error) {
-            // If refresh fails, fall through to login
-            console.warn("Failed to refresh token, attempting login:", error);
-          }
+      if (this.auth_info.refresh_token && !this.isRefreshTokenExpired()) {
+        console.log("Access token expired, refreshing");
+        try {
+          await this.refreshToken();
+          return this.getAuthState();
+        } catch (error) {
+          console.warn("Failed to refresh token, attempting login:", error);
+          this.clearLoginSession();
+        }
+      } else {
+        this.clearLoginSession();
+      }
+    } else if (this.auth_info.refresh_token) {
+      if (this.isRefreshTokenExpired()) {
+        console.log("Refresh token has expired, need to login");
+        this.clearLoginSession();
+      } else {
+        console.log("No access token, attempting to refresh using refresh token");
+        try {
+          await this.refreshToken();
+          console.log("Successfully refreshed token");
+          return this.getAuthState();
+        } catch (error) {
+          console.warn("Failed to refresh token, attempting login:", error);
+          this.clearLoginSession();
         }
       }
-      
-      // No valid tokens, need to login
-      if (this.auth_info.email && this.auth_info.password) {
-        console.log("No valid tokens found, attempting login");
-        await this.login(this.auth_info.email, this.auth_info.password);
-      } else {
-        throw new Error("Invalid auth_info");
-      }
     }
+
+    if (this.auth_info.email && this.auth_info.password) {
+      console.log("No valid tokens found, attempting login");
+      await this.login();
+      return this.getAuthState();
+    }
+
+    throw new Error("email and password are required to log in");
   };
 
   public get = async (path: string): Promise<MacBidApiResponse> => {
@@ -209,6 +284,12 @@ export class MacBid {
     
     if (hasError) {
       console.error("Validation failed:", errorMessage || validation_res.status);
+      if (errorMessage.toLowerCase().includes("already verified")) {
+        this.clearLoginSession();
+        throw new Error(
+          "Validation code was already used. Clear saved auth state and authenticate again to request a new code."
+        );
+      }
       throw new Error(`Validation failed: ${errorMessage || "Unknown error"}`);
     }
 
@@ -226,9 +307,8 @@ export class MacBid {
       this.auth_info.token_expiration = new Date(expires * 1000);
       this.auth_info.refresh_token = refresh_token;
       this.auth_info.refresh_token_expiration = new Date(expiration_refresh * 1000);
-      this.auth_info.pending_2fa = false;
-      await this.saveAuthState();
-      console.log("✓ Login successful, tokens saved");
+      delete this.auth_info.validation_code;
+      console.log("✓ Login successful");
       return true;
     } else {
       console.error("No access token in validation response");
@@ -237,56 +317,36 @@ export class MacBid {
   };
 
   /**
-   * Do the login request
-   * @param email - User email
-   * @param password - User password
-   * @param validation_code - Optional validation code. If not provided, will check auth_info.validation_code
+   * Do the login request using auth_info fields.
    */
-  public login = async (
-    email: string,
-    password: string,
-    validation_code?: string
-  ): Promise<boolean> => {
-    // Use device_id from: 1) auth_info, 2) environment variable, 3) generate new one
-    const device_id = 
-      this.auth_info.device_id || 
-      process.env.MACBID_DEVICE_ID || 
-      randomUUID();
-    
-    if (!this.auth_info.device_id) {
-      this.auth_info.device_id = device_id;
-      if (process.env.MACBID_DEVICE_ID) {
-        console.log("Using device_id from MACBID_DEVICE_ID environment variable");
-      } else {
-        console.log("Generated new device_id:", device_id);
-      }
+  private login = async (): Promise<boolean> => {
+    const email = this.auth_info.email;
+    const password = this.auth_info.password;
+    if (!email || !password) {
+      throw new Error("email and password are required to log in");
     }
 
-    // Get validation code from parameter, auth_info, or env
-    const code =
-      validation_code ||
-      this.auth_info.validation_code ||
-      process.env.MACBID_VALIDATION_CODE;
+    const code = this.auth_info.validation_code;
 
-    // If we have a validation code, try to validate it
-    // Note: Validation codes expire quickly and are tied to the device_id that requested them
     if (code) {
+      const device_id = this.auth_info.device_id;
+      if (!device_id) {
+        throw new Error("device_id is required to validate a code");
+      }
       console.log("Validation code present, attempting to validate...");
       return await this.validateCode(code, device_id);
     }
 
-    // A code was already sent in a previous session — don't request another one
-    if (this.auth_info.pending_2fa) {
+    if (this.isAwaiting2FA()) {
       throw new Error(
-        "A validation code was already sent for this device.\n" +
-        "  1. Check your phone/SMS for the validation code\n" +
-        "  2. Add MACBID_VALIDATION_CODE=<code> to your .env file\n" +
-        "  3. Restart the application\n" +
-        "\nTo request a new code, delete .macbid-tokens.json and restart."
+        "A validation code was already sent for this device_id. Provide validation_code to continue."
       );
     }
 
-    // No validation code, request one
+    const device_id = randomUUID();
+    this.auth_info.device_id = device_id;
+    console.log("Generated new device_id:", device_id);
+
     console.log("No validation code found, requesting new code...");
     const login_params = {
       device_id: device_id,
@@ -307,16 +367,9 @@ export class MacBid {
     const resJson = await res.json();
 
     if (resJson["message"] === "Login validation code sent") {
-      console.log("✓ Validation code sent to your phone");
-      console.log("Please add MACBID_VALIDATION_CODE=<code> to your .env file and restart");
-      this.auth_info.pending_2fa = true;
-      await this.saveAuthState();
+      console.log("✓ Validation code sent");
       throw new Error(
-        "Validation code sent. Please:\n" +
-        "  1. Check your phone/SMS for the validation code\n" +
-        "  2. Add MACBID_VALIDATION_CODE=<code> to your .env file\n" +
-        "  3. Restart the application\n" +
-        "\nThe code will be used automatically on restart."
+        "Validation code sent. Provide validation_code and authenticate again."
       );
     }
     
@@ -387,9 +440,10 @@ export class MacBid {
       expiration_refresh?: number;
     };
 
-    // Check for error response
-    if (resJson["error"]) {
-      throw new Error(`Failed to refresh token: ${resJson["error"]}`);
+    if (!res.ok || resJson.error) {
+      throw new Error(
+        `Failed to refresh token: ${resJson.error || res.status}`
+      );
     }
 
     const access_token = resJson["access_token"] as string;
@@ -410,7 +464,6 @@ export class MacBid {
         this.auth_info.refresh_token_expiration = new Date(expiration_refresh * 1000);
       }
 
-      await this.saveAuthState();
       return true;
     } else {
       throw new Error("Failed to refresh token: no access token in response");
@@ -436,68 +489,6 @@ export class MacBid {
     );
 
     return (await res.json())["watchlist_full"] as WatchlistFull[];
-  };
-
-  /**
-   * Save auth state to file for persistence across restarts.
-   * Persists tokens when available, and always persists device_id / pending_2fa
-   * so a 2FA session survives app restarts.
-   */
-  private saveAuthState = async (): Promise<void> => {
-    if (!this.tokenFilePath) {
-      console.log("No token file path provided, skipping auth state save");
-      return;
-    }
-
-    try {
-      const tokenData = {
-        token: this.auth_info.token,
-        refresh_token: this.auth_info.refresh_token,
-        token_expiration: this.auth_info.token_expiration?.toISOString(),
-        refresh_token_expiration: this.auth_info.refresh_token_expiration?.toISOString(),
-        user_id: this.auth_info.user_id,
-        device_id: this.auth_info.device_id,
-        pending_2fa: this.auth_info.pending_2fa ?? false,
-      };
-
-      console.log("Attempting to save auth state to:", this.tokenFilePath);
-      await fs.writeFile(this.tokenFilePath, JSON.stringify(tokenData, null, 2), "utf-8");
-      console.log("✓ Auth state successfully saved to file:", this.tokenFilePath);
-    } catch (error) {
-      console.error("✗ Failed to save auth state to", this.tokenFilePath, ":", error);
-      throw error;
-    }
-  };
-
-  /**
-   * Load saved auth state from file (tokens, device_id, pending_2fa).
-   */
-  public static loadTokens = async (tokenFilePath: string): Promise<Partial<AuthInfo> | null> => {
-    try {
-      const data = await fs.readFile(tokenFilePath, "utf-8");
-      const tokenData = JSON.parse(data) as {
-        token?: string;
-        refresh_token?: string;
-        token_expiration?: string;
-        refresh_token_expiration?: string;
-        user_id?: string;
-        device_id?: string;
-        pending_2fa?: boolean;
-      };
-
-      return {
-        token: tokenData.token,
-        refresh_token: tokenData.refresh_token,
-        token_expiration: tokenData.token_expiration ? new Date(tokenData.token_expiration) : undefined,
-        refresh_token_expiration: tokenData.refresh_token_expiration ? new Date(tokenData.refresh_token_expiration) : undefined,
-        user_id: tokenData.user_id,
-        device_id: tokenData.device_id,
-        pending_2fa: tokenData.pending_2fa,
-      };
-    } catch {
-      // File doesn't exist or is invalid, return null
-      return null;
-    }
   };
 }
 
