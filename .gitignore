@@ -1,5 +1,6 @@
 # Ignore compiled code
 *.js
+!eslint.config.js
 *.d.ts
 *.map
 
