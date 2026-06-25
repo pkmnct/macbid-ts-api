@@ -11,6 +11,7 @@ export interface AuthInfo {
   refresh_token_expiration?: Date;
   validation_code?: string;
   device_id?: string;
+  remember_me?: boolean;
 }
 
 /** JSON-serializable auth fields safe to persist (no credentials). */
@@ -504,8 +505,16 @@ export class MacBid {
       throw new Error("Refresh token has expired. Please login again.");
     }
 
+    if (!this.auth_info.device_id) {
+      throw new Error(
+        "device_id is required to refresh token. Re-authenticate to obtain one."
+      );
+    }
+
     const refresh_params = {
-      refresh_token: this.auth_info.refresh_token,
+      token: this.auth_info.refresh_token,
+      device_id: this.auth_info.device_id,
+      remember_me: this.auth_info.remember_me ?? true,
     };
 
     // Use fetch directly to avoid triggering ensureValidToken and use PUT method
