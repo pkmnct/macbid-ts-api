@@ -11,6 +11,7 @@ export interface AuthInfo {
   refresh_token_expiration?: Date;
   validation_code?: string;
   device_id?: string;
+  remember_me?: boolean;
 }
 
 /** JSON-serializable auth fields safe to persist (no credentials). */
@@ -69,6 +70,91 @@ export enum ConditionName {
   Damaged = "DAMAGED",
   LikeNew = "LIKE NEW",
   OpenBox = "OPEN BOX",
+}
+
+export interface ActiveItem {
+  id: number;
+  invoice_id: number;
+  box_size: string;
+  warehouse_location: string;
+  is_assisted_removal: number;
+  removal_container: string | null;
+  product_name: string;
+  status: string;
+  boxes: number;
+  note: string | null;
+  current_location_id: number;
+  allow_transfers: number;
+  allow_shipping: number;
+  is_turbo: number;
+  free_transfers: number;
+  auction_number: string;
+  auction_abandon_date: string;
+  abandon_date: string | null;
+  lot_number: string;
+  lot_id: number;
+  has_buyer_assurance: number;
+  item_price: number;
+  cover_image: string;
+  grand_total: number;
+  date_paid: string;
+  transfer_id: number | null;
+  start_location_code: string | null;
+  dest_location_code: string | null;
+  start_location_id: number | null;
+  dest_location_id: number | null;
+  grouping_id: string;
+  auction_lot_deadline: string | null;
+  auction_lot_number: string;
+}
+
+export interface BuildingLicenseInfo {
+  firm_license_label: string;
+  firm_license: string | null;
+  auctioneer_license: string | null;
+  auctioneer_of_record: string | null;
+}
+
+export interface Building {
+  id: number;
+  name: string;
+  address: string;
+  maps_place_id: string;
+  city_state: string;
+  zip_code: string;
+  state_abbr: string;
+  notes: string | null;
+  hours: string;
+  code: string;
+  latitude: number;
+  longitude: number;
+  region_id: number;
+  auction_license: string | null;
+  sales_tax: number;
+  auctioneer_license: string | null;
+  auctioneer_of_record: string | null;
+  transfer_destinations: string | null;
+  box_sizes: string;
+  has_bin_store: number;
+  license_info: BuildingLicenseInfo;
+}
+
+export interface Location {
+  id: number;
+  name: string;
+  address: string;
+  city_state: string;
+  zip_code: string;
+  can_transfer: number;
+  color: string | null;
+  notes: string;
+  hours: string;
+  code: string;
+  box_size: string;
+  building_id: number;
+  region_id: number;
+  auction_license: string | null;
+  transfer_destinations: string | null;
 }
 
 export interface MacBidApiResponse extends Response {
@@ -419,8 +505,16 @@ export class MacBid {
       throw new Error("Refresh token has expired. Please login again.");
     }
 
+    if (!this.auth_info.device_id) {
+      throw new Error(
+        "device_id is required to refresh token. Re-authenticate to obtain one."
+      );
+    }
+
     const refresh_params = {
-      refresh_token: this.auth_info.refresh_token,
+      token: this.auth_info.refresh_token,
+      device_id: this.auth_info.device_id,
+      remember_me: this.auth_info.remember_me ?? true,
     };
 
     // Use fetch directly to avoid triggering ensureValidToken and use PUT method
@@ -489,6 +583,36 @@ export class MacBid {
     );
 
     return (await res.json())["watchlist_full"] as WatchlistFull[];
+  };
+
+  /**
+   * Returns the logged in user's active won items (e.g. awaiting pickup).
+   */
+  public get_active = async (): Promise<ActiveItem[]> => {
+    this.check_auth();
+    const res = await this.get(`/user/${this.auth_info["user_id"]}/active`);
+
+    return (await res.json()) as unknown as ActiveItem[];
+  };
+
+  /**
+   * Returns all Mac.Bid warehouse buildings.
+   */
+  public get_buildings = async (): Promise<Building[]> => {
+    this.check_auth();
+    const res = await this.get("/buildings");
+
+    return (await res.json()) as unknown as Building[];
+  };
+
+  /**
+   * Returns all Mac.Bid pickup locations.
+   */
+  public get_locations = async (): Promise<Location[]> => {
+    this.check_auth();
+    const res = await this.get("/locations");
+
+    return (await res.json()) as unknown as Location[];
   };
 }
 
