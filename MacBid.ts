@@ -1,4 +1,3 @@
-import fetch, { Response } from "node-fetch";
 import { randomUUID } from "node:crypto";
 
 export interface AuthInfo {
@@ -166,6 +165,8 @@ export interface MacBidApiResponse extends Response {
 export class MacBid {
   public LOGIN_PAGE_URL = "https://www.mac.bid";
   public API_ROOT = "https://api.macdiscount.com";
+  /** Give up on a request to Mac.Bid after this many milliseconds. */
+  public REQUEST_TIMEOUT_MS = 30_000;
 
   private macbid_session_headers: { [key: string]: string } = {
     "Content-Type": "application/json",
@@ -290,11 +291,29 @@ export class MacBid {
     throw new Error("email and password are required to log in");
   };
 
+  private request = async (
+    path: string,
+    options: RequestInit = {}
+  ): Promise<MacBidApiResponse> =>
+    (await fetch(this.API_ROOT + path, {
+      headers: this.macbid_session_headers,
+      signal: AbortSignal.timeout(this.REQUEST_TIMEOUT_MS),
+      ...options,
+    })) as MacBidApiResponse;
+
+  /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
+  private getJson = async <T>(path: string): Promise<T> => {
+    this.check_auth();
+    const res = await this.get(path);
+    if (!res.ok) {
+      throw new Error(`Mac.Bid returned HTTP ${res.status} for ${path}`);
+    }
+    return (await res.json()) as T;
+  };
+
   public get = async (path: string): Promise<MacBidApiResponse> => {
     await this.ensureValidToken();
-    return (await fetch(this.API_ROOT + path, {
-      headers: this.macbid_session_headers,
-    })) as MacBidApiResponse;
+    return this.request(path);
   };
 
   public post = async (
@@ -305,13 +324,7 @@ export class MacBid {
     if (!path.includes("/auth/")) {
       await this.ensureValidToken();
     }
-    return (await fetch(this.API_ROOT + path, {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore
-      headers: this.macbid_session_headers,
-      method: "POST",
-      ...options,
-    })) as MacBidApiResponse;
+    return this.request(path, { method: "POST", ...options });
   };
 
   /**
@@ -331,7 +344,7 @@ export class MacBid {
     code: string,
     device_id: string
   ): Promise<boolean> => {
-    console.log("Validating code with device_id:", device_id);
+    console.log("Validating code");
 
     const validation_params = {
       code: code,
@@ -343,7 +356,7 @@ export class MacBid {
     console.log("Sending validation request to /auth/validate-access-code");
 
     // Use PUT method like the browser does
-    const validation_res = await fetch(this.API_ROOT + "/auth/validate-access-code", {
+    const validation_res = await this.request("/auth/validate-access-code", {
       method: "PUT",
       body: JSON.stringify(validation_params),
       headers: {
@@ -431,7 +444,8 @@ export class MacBid {
 
     const device_id = randomUUID();
     this.auth_info.device_id = device_id;
-    console.log("Generated new device_id:", device_id);
+    // device_id is needed together with the refresh token, so it is not logged
+    console.log("Generated new device_id");
 
     console.log("No validation code found, requesting new code...");
     const login_params = {
@@ -459,8 +473,11 @@ export class MacBid {
       );
     }
     
-    console.error("Unexpected login response:", JSON.stringify(resJson, null, 2));
-    throw new Error("Login failed");
+    // The body is not logged: it can carry account details
+    const reason = resJson["error"] ?? resJson["message"];
+    throw new Error(
+      `Login failed: ${typeof reason === "string" ? reason : `HTTP ${res.status}`}`
+    );
   };
 
   public get_refresh_token_expiration = (): Date => {
@@ -517,8 +534,8 @@ export class MacBid {
       remember_me: this.auth_info.remember_me ?? true,
     };
 
-    // Use fetch directly to avoid triggering ensureValidToken and use PUT method
-    const res = await fetch(this.API_ROOT + "/auth/refresh-token", {
+    // Bypass get/post so ensureValidToken is not triggered; the browser uses PUT
+    const res = await this.request("/auth/refresh-token", {
       method: "PUT",
       body: JSON.stringify(refresh_params),
       headers: {
@@ -577,43 +594,29 @@ export class MacBid {
    * Returns the logged in user's favorites, and all of their (visible) attributes.
    */
   public get_watchlist = async (): Promise<WatchlistFull[]> => {
-    this.check_auth();
-    const res = await this.get(
+    const body = await this.getJson<{ watchlist_full?: WatchlistFull[] }>(
       `/auctions/customer/${this.auth_info["user_id"]}/active-auctions`
     );
-
-    return (await res.json())["watchlist_full"] as WatchlistFull[];
+    return body.watchlist_full ?? [];
   };
 
   /**
    * Returns the logged in user's active won items (e.g. awaiting pickup).
    */
-  public get_active = async (): Promise<ActiveItem[]> => {
-    this.check_auth();
-    const res = await this.get(`/user/${this.auth_info["user_id"]}/active`);
-
-    return (await res.json()) as unknown as ActiveItem[];
-  };
+  public get_active = async (): Promise<ActiveItem[]> =>
+    this.getJson<ActiveItem[]>(`/user/${this.auth_info["user_id"]}/active`);
 
   /**
    * Returns all Mac.Bid warehouse buildings.
    */
-  public get_buildings = async (): Promise<Building[]> => {
-    this.check_auth();
-    const res = await this.get("/buildings");
-
-    return (await res.json()) as unknown as Building[];
-  };
+  public get_buildings = async (): Promise<Building[]> =>
+    this.getJson<Building[]>("/buildings");
 
   /**
    * Returns all Mac.Bid pickup locations.
    */
-  public get_locations = async (): Promise<Location[]> => {
-    this.check_auth();
-    const res = await this.get("/locations");
-
-    return (await res.json()) as unknown as Location[];
-  };
+  public get_locations = async (): Promise<Location[]> =>
+    this.getJson<Location[]>("/locations");
 }
 
 export default MacBid;
