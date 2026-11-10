@@ -156,7 +156,16 @@ export interface Location {
   transfer_destinations: string | null;
 }
 
-export interface MacBidApiResponse extends Response {
+/**
+ * What the low-level \`get\` and \`post\` return: the status and headers of
+ * Mac.Bid's answer and its body, already read in full.
+ */
+export interface MacBidApiResponse {
+  status: number;
+  statusText: string;
+  ok: boolean;
+  headers: Headers;
+  text: () => Promise<string>;
   json: () => Promise<{
     [key: string]: unknown;
   }>;
@@ -311,19 +320,8 @@ export class MacBid {
       }
       if (this.auth_info.refresh_token && !this.isRefreshTokenExpired()) {
         console.log("Access token expired, refreshing");
-        try {
-          await this.refreshToken();
+        if (await this.tryRefresh()) {
           return this.getAuthState();
-        } catch (error) {
-          // An outage says nothing about the session: keep it and let the caller retry
-          if (error instanceof MacBidUnavailableError) {
-            throw error;
-          }
-          console.warn(
-            "Failed to refresh token, attempting login:",
-            error instanceof Error ? error.message : String(error)
-          );
-          this.clearLoginSession();
         }
       } else {
         this.clearLoginSession();
@@ -334,20 +332,9 @@ export class MacBid {
         this.clearLoginSession();
       } else {
         console.log("No access token, attempting to refresh using refresh token");
-        try {
-          await this.refreshToken();
+        if (await this.tryRefresh()) {
           console.log("Successfully refreshed token");
           return this.getAuthState();
-        } catch (error) {
-          // An outage says nothing about the session: keep it and let the caller retry
-          if (error instanceof MacBidUnavailableError) {
-            throw error;
-          }
-          console.warn(
-            "Failed to refresh token, attempting login:",
-            error instanceof Error ? error.message : String(error)
-          );
-          this.clearLoginSession();
         }
       }
     }
@@ -372,7 +359,7 @@ export class MacBid {
       : timeout;
 
     let res: Response;
-    let body: ArrayBuffer;
+    let text: string;
     try {
       res = await fetch(this.API_ROOT + path, {
         headers: this.macbid_session_headers,
@@ -381,7 +368,7 @@ export class MacBid {
       });
       // Read the body here so a stall or reset mid-body is also reported as
       // MacBidUnavailableError rather than escaping from a later res.json()
-      body = await res.arrayBuffer();
+      text = await res.text();
     } catch (error) {
       // The caller cancelled this request: that is not an outage
       if (options.signal?.aborted) {
@@ -399,17 +386,66 @@ export class MacBid {
         { retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) }
       );
     }
-    // Null-body statuses must not be given a body
-    const nullBody = [101, 204, 205, 304].includes(res.status);
-    // fetch already decoded the body, so these headers no longer describe it
-    const headers = new Headers(res.headers);
-    headers.delete("content-encoding");
-    headers.delete("content-length");
-    return new Response(nullBody ? null : body, {
+    return {
       status: res.status,
       statusText: res.statusText,
-      headers,
-    }) as MacBidApiResponse;
+      ok: res.ok,
+      headers: res.headers,
+      text: async () => text,
+      json: async () => JSON.parse(text) as { [key: string]: unknown },
+    };
+  };
+
+  /**
+   * Parse the body of an auth endpoint's answer. A gateway can answer with an
+   * empty or HTML body, and that must not hide the HTTP status.
+   */
+  private readAuthJson = async (
+    res: MacBidApiResponse
+  ): Promise<{ [key: string]: unknown }> => {
+    try {
+      return await res.json();
+    } catch {
+      return {};
+    }
+  };
+
+  /** A token expiry from an auth answer: seconds since the epoch. */
+  private expiryDate = (seconds: unknown, what: string): Date => {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
+      throw new Error(`Mac.Bid answered without a valid ${what}`);
+    }
+    return new Date(seconds * 1000);
+  };
+
+  /** Refresh the access token; false when the refresh token is no good. */
+  private tryRefresh = async (): Promise<boolean> => {
+    try {
+      await this.refreshToken();
+      return true;
+    } catch (error) {
+      // An outage says nothing about the session: keep it and let the caller retry
+      if (error instanceof MacBidUnavailableError) {
+        throw error;
+      }
+      console.warn(
+        "Failed to refresh token, attempting login:",
+        error instanceof Error ? error.message : String(error)
+      );
+      this.clearLoginSession();
+      return false;
+    }
+  };
+
+  /** The signed-in user's id, for the per-user endpoints. */
+  private requireUserId = (): string => {
+    const userId = this.auth_info.user_id;
+    if (!userId) {
+      throw new Error(
+        "user_id is not set; authenticate (or restore a saved state that includes it) first"
+      );
+    }
+    return userId;
   };
 
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
@@ -417,8 +453,10 @@ export class MacBid {
     path: string,
     { userSpecific = true }: { userSpecific?: boolean } = {}
   ): Promise<T> => {
-    this.check_auth();
-    await this.ensureValidToken();
+    if (userSpecific) {
+      this.check_auth();
+      await this.ensureValidToken();
+    }
     const sentWith = this.macbid_session_headers["Authorization"];
     let res = await this.request(path);
     if (
@@ -457,7 +495,11 @@ export class MacBid {
     if (!res.ok) {
       throw new Error(`Mac.Bid returned HTTP ${res.status} for ${path}`);
     }
-    return (await res.json()) as T;
+    try {
+      return (await res.json()) as T;
+    } catch {
+      throw new Error(`Mac.Bid returned a response that is not JSON for ${path}`);
+    }
   };
 
   /** Like getJson, for endpoints that answer with a list. */
@@ -475,11 +517,30 @@ export class MacBid {
     return body as T[];
   };
 
-  public get = async (path: string): Promise<MacBidApiResponse> => {
-    await this.ensureValidToken();
-    return this.request(path);
+  /** The session headers with the caller's headers on top, not instead of them. */
+  private withSessionHeaders = (extra?: RequestInit["headers"]): Headers => {
+    const headers = new Headers(this.macbid_session_headers);
+    new Headers(extra).forEach((value, name) => headers.set(name, value));
+    return headers;
   };
 
+  /**
+   * Low-level GET with the session's token (refreshed when it has expired). It
+   * returns whatever Mac.Bid answers: unlike the \`get_*\` methods it does not
+   * retry a rejected token or clear a dead session, and does not throw on 4xx.
+   */
+  public get = async (
+    path: string,
+    options?: RequestInit
+  ): Promise<MacBidApiResponse> => {
+    await this.ensureValidToken();
+    return this.request(path, {
+      ...options,
+      headers: this.withSessionHeaders(options?.headers),
+    });
+  };
+
+  /** Low-level POST; see \`get\`. Caller headers are added to the session headers. */
   public post = async (
     path: string,
     options?: RequestInit
@@ -488,7 +549,11 @@ export class MacBid {
     if (!path.includes("/auth/")) {
       await this.ensureValidToken();
     }
-    return this.request(path, { method: "POST", ...options });
+    return this.request(path, {
+      method: "POST",
+      ...options,
+      headers: this.withSessionHeaders(options?.headers),
+    });
   };
 
   /**
@@ -528,23 +593,30 @@ export class MacBid {
       },
     });
 
-    const validation_resJson = (await validation_res.json()) as {
-      error?: string;
-      message?: string;
+    const validation_resJson = (await this.readAuthJson(validation_res)) as {
+      error?: unknown;
+      message?: unknown;
       access_token?: string;
       refresh_token?: string;
       user_id?: number;
-      expires?: number;
-      expiration_refresh?: number;
+      expires?: unknown;
+      expiration_refresh?: unknown;
     };
 
     console.log("Validation response status:", validation_res.status);
 
-    const errorMessage = validation_resJson["error"] || validation_resJson["message"] || "";
-    const hasError = validation_res.status !== 200 || 
-                    !!validation_resJson["error"] || 
-                    (typeof errorMessage === "string" && errorMessage.includes("Missing"));
-    
+    const rawError = validation_resJson["error"] || validation_resJson["message"];
+    // The error can come as an object or a number: keep it readable
+    const errorMessage =
+      typeof rawError === "string"
+        ? rawError
+        : rawError == null
+          ? ""
+          : JSON.stringify(rawError);
+    const hasError = validation_res.status !== 200 ||
+                    !!validation_resJson["error"] ||
+                    errorMessage.includes("Missing");
+
     if (hasError) {
       console.error("Validation failed:", errorMessage || validation_res.status);
       if (errorMessage.toLowerCase().includes("already verified")) {
@@ -556,23 +628,31 @@ export class MacBid {
       // Keep the device_id (the SMS is still good) but forget the rejected code,
       // or every later authenticate() would send it again
       delete this.auth_info.validation_code;
-      throw new Error(`Validation failed: ${errorMessage || "Unknown error"}`);
+      throw new Error(
+        `Validation failed: ${errorMessage || `HTTP ${validation_res.status}`}`
+      );
     }
 
     const access_token = validation_resJson["access_token"] as string;
     const refresh_token = validation_resJson["refresh_token"] as string;
     const user_id = validation_resJson["user_id"] as number;
-    const expires = validation_resJson["expires"] as number;
-    const expiration_refresh = validation_resJson["expiration_refresh"] as number;
 
     if (access_token) {
+      const token_expiration = this.expiryDate(
+        validation_resJson["expires"],
+        "expires"
+      );
+      const refresh_token_expiration = this.expiryDate(
+        validation_resJson["expiration_refresh"],
+        "expiration_refresh"
+      );
       console.log("Access token received, saving tokens...");
       this.auth_info.token = access_token as string;
       this.auth_info.user_id = String(user_id);
       this.macbid_session_headers["Authorization"] = this.auth_info.token;
-      this.auth_info.token_expiration = new Date(expires * 1000);
+      this.auth_info.token_expiration = token_expiration;
       this.auth_info.refresh_token = refresh_token;
-      this.auth_info.refresh_token_expiration = new Date(expiration_refresh * 1000);
+      this.auth_info.refresh_token_expiration = refresh_token_expiration;
       delete this.auth_info.validation_code;
       console.log("✓ Login successful");
       return true;
@@ -631,7 +711,7 @@ export class MacBid {
       body: JSON.stringify(login_params),
     });
 
-    const resJson = await res.json();
+    const resJson = await this.readAuthJson(res);
 
     if (resJson["message"] === "Login validation code sent") {
       console.log("✓ Validation code sent");
@@ -723,12 +803,12 @@ export class MacBid {
       },
     });
 
-    const resJson = (await res.json()) as {
+    const resJson = (await this.readAuthJson(res)) as {
       error?: string;
       access_token?: string;
       refresh_token?: string;
-      expires?: number;
-      expiration_refresh?: number;
+      expires?: unknown;
+      expiration_refresh?: unknown;
     };
 
     if (res.status === 400 || res.status === 401 || res.status === 403) {
@@ -748,20 +828,23 @@ export class MacBid {
 
     const access_token = resJson["access_token"] as string;
     const refresh_token = resJson["refresh_token"] as string | undefined;
-    const expires = resJson["expires"] as number;
-    const expiration_refresh = resJson["expiration_refresh"] as number | undefined;
+    const expiration_refresh = resJson["expiration_refresh"];
 
     if (access_token) {
+      const token_expiration = this.expiryDate(resJson["expires"], "expires");
       this.auth_info.token = access_token;
       this.macbid_session_headers["Authorization"] = this.auth_info.token;
-      this.auth_info.token_expiration = new Date(expires * 1000);
+      this.auth_info.token_expiration = token_expiration;
 
       // Update refresh token if a new one is provided
       if (refresh_token) {
         this.auth_info.refresh_token = refresh_token;
       }
       if (expiration_refresh) {
-        this.auth_info.refresh_token_expiration = new Date(expiration_refresh * 1000);
+        this.auth_info.refresh_token_expiration = this.expiryDate(
+          expiration_refresh,
+          "expiration_refresh"
+        );
       }
 
       return true;
@@ -784,7 +867,7 @@ export class MacBid {
    */
   public get_watchlist = async (): Promise<WatchlistFull[]> => {
     const body = await this.getJson<{ watchlist_full?: WatchlistFull[] }>(
-      `/auctions/customer/${this.auth_info["user_id"]}/active-auctions`
+      `/auctions/customer/${this.requireUserId()}/active-auctions`
     );
     if (body.watchlist_full == null) {
       // An account with nothing on its watchlist may omit the list. Say so in
@@ -810,7 +893,7 @@ export class MacBid {
    */
   public get_active = async (): Promise<ActiveItem[]> =>
     this.getJsonArray<ActiveItem>(
-      `/user/${this.auth_info["user_id"]}/active`,
+      `/user/${this.requireUserId()}/active`,
       "active items"
     );
 

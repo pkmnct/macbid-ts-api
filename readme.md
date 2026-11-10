@@ -95,7 +95,7 @@ try {
 | `get_active()` | Active won items (e.g. awaiting pickup) |
 | `get_buildings()` | Warehouse buildings |
 | `get_locations()` | Pickup locations |
-| `get(path)` / `post(path, options?)` | Authenticated API requests |
+| `get(path, options?)` / `post(path, options?)` | Low-level requests with the session token. They return Mac.Bid's answer as is (`status`, `ok`, `headers`, `text()`, `json()`): no retry of a rejected token, no `MacBidAuthError`, and no throw on 4xx. Headers you pass are added to the session headers |
 | `refreshToken()` | Refresh the access token |
 | `getAuthState()` | Current persistable state |
 | `get_refresh_token_expiration()` | Refresh token expiry |

@@ -7,7 +7,12 @@ import MacBid, { MacBidAuthError, MacBidUnavailableError } from "./MacBid.js";
 type Handler = (
   req: http.IncomingMessage,
   body: string
-) => { status: number; json?: unknown; headers?: Record<string, string> };
+) => {
+  status: number;
+  json?: unknown;
+  raw?: string;
+  headers?: Record<string, string>;
+};
 
 let server: http.Server;
 let root: string;
@@ -33,7 +38,7 @@ before(async () => {
         "Content-Type": "application/json",
         ...out.headers,
       });
-      res.end(JSON.stringify(out.json ?? {}));
+      res.end(out.raw ?? JSON.stringify(out.json ?? {}));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -245,5 +250,102 @@ describe("sign-in", () => {
     await assert.rejects(api.authenticate(), /Validation code sent/);
     assert.notEqual(api.getAuthState().device_id, first);
     assert.equal(count("POST /auth/auth-validation"), 2);
+  });
+});
+
+describe("odd answers from Mac.Bid", () => {
+  it("refuses a refresh with a non-JSON body as MacBidAuthError", async () => {
+    handlers["GET /user/7/active"] = () => ({ status: 401, json: {} });
+    handlers["PUT /auth/refresh-token"] = () => ({
+      status: 401,
+      raw: "<html>Unauthorized</html>",
+    });
+    const api = await signedInClient();
+
+    await assert.rejects(api.get_active(), MacBidAuthError);
+    assert.equal(api.getAuthState().refresh_token, undefined);
+  });
+
+  it("rejects a login answer without a usable expiry", async () => {
+    handlers["POST /auth/auth-validation"] = () => ({
+      status: 200,
+      json: { message: "Login validation code sent" },
+    });
+    handlers["PUT /auth/validate-access-code"] = () => ({
+      status: 200,
+      json: { access_token: "t", refresh_token: "r", user_id: 7 },
+    });
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await assert.rejects(
+      api.authenticate({ email: "a@example.test", password: "pw" }),
+      /Validation code sent/
+    );
+    await assert.rejects(
+      api.authenticate({ validation_code: "123456" }),
+      /valid expires/
+    );
+    assert.equal(api.getAuthState().token, undefined);
+  });
+
+  it("forgets the code even when the error is not a string", async () => {
+    handlers["POST /auth/auth-validation"] = () => ({
+      status: 200,
+      json: { message: "Login validation code sent" },
+    });
+    handlers["PUT /auth/validate-access-code"] = () => ({
+      status: 400,
+      json: { error: { code: 42 } },
+    });
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await assert.rejects(
+      api.authenticate({ email: "a@example.test", password: "pw" }),
+      /Validation code sent/
+    );
+    await assert.rejects(
+      api.authenticate({ validation_code: "000000" }),
+      /Validation failed/
+    );
+    await assert.rejects(api.authenticate(), /already sent/);
+    assert.equal(count("PUT /auth/validate-access-code"), 1);
+  });
+
+  it("does not log the user out when user_id is missing", async () => {
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await api.authenticate({
+      token: "old",
+      refresh_token: "refresh-1",
+      token_expiration: future(3600),
+      refresh_token_expiration: future(86400),
+      device_id: "device-1",
+    });
+
+    await assert.rejects(api.get_active(), /user_id is not set/);
+    assert.equal(api.getAuthState().token, "old");
+    assert.equal(calls.length, 0);
+  });
+
+  it("serves the public endpoints without a login", async () => {
+    handlers["GET /buildings"] = () => ({ status: 200, json: [{ id: 1 }] });
+    const api = new MacBid();
+    api.API_ROOT = root;
+    assert.equal((await api.get_buildings()).length, 1);
+  });
+
+  it("keeps the session headers when the caller adds its own", async () => {
+    let seen: http.IncomingHttpHeaders = {};
+    handlers["POST /things"] = (req) => {
+      seen = req.headers;
+      return { status: 200, json: {} };
+    };
+    const api = await signedInClient();
+    await api.post("/things", {
+      body: "{}",
+      headers: { "Content-Type": "application/json" },
+    });
+    assert.equal(seen.authorization, "old");
+    assert.equal(seen["content-type"], "application/json");
   });
 });
