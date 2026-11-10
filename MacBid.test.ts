@@ -15,6 +15,10 @@ let handlers: Record<string, Handler> = {};
 let calls: string[] = [];
 
 before(async () => {
+  // The client logs its progress; keep that out of the test report
+  console.log = () => undefined;
+  console.warn = () => undefined;
+  console.error = () => undefined;
   server = http.createServer((req, res) => {
     const key = `${req.method} ${req.url}`;
     calls.push(key);

@@ -418,7 +418,9 @@ export class MacBid {
     { userSpecific = true }: { userSpecific?: boolean } = {}
   ): Promise<T> => {
     this.check_auth();
-    let res = await this.get(path);
+    await this.ensureValidToken();
+    const sentWith = this.macbid_session_headers["Authorization"];
+    let res = await this.request(path);
     if (
       userSpecific &&
       (res.status === 401 || res.status === 403) &&
@@ -429,8 +431,12 @@ export class MacBid {
       // rotated elsewhere, clock skew): get a new one and retry once before
       // giving up on the whole session
       try {
-        await this.refreshToken();
-        res = await this.get(path);
+        // A parallel request may already have replaced the token this one was
+        // sent with: use that one, and do not refresh (and rotate) again
+        if (this.macbid_session_headers["Authorization"] === sentWith) {
+          await this.refreshToken();
+        }
+        res = await this.request(path);
       } catch (error) {
         if (error instanceof MacBidUnavailableError) {
           // Mac.Bid is unreachable: says nothing about the session
