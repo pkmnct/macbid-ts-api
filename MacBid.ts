@@ -168,7 +168,29 @@ export interface MacBidApiResponse extends Response {
  */
 export class MacBidUnavailableError extends Error {
   override name = "MacBidUnavailableError";
+  /**
+   * How long Mac.Bid asked callers to wait before retrying (from the
+   * Retry-After header), in milliseconds. Undefined when it did not say.
+   */
+  retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    options?: ErrorOptions & { retryAfterMs?: number }
+  ) {
+    super(message, options);
+    this.retryAfterMs = options?.retryAfterMs;
+  }
 }
+
+/** Parse a Retry-After header: delay in seconds, or an HTTP date. */
+const parseRetryAfter = (value: string | null): number | undefined => {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  const date = Date.parse(trimmed);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+};
 
 export class MacBid {
   public LOGIN_PAGE_URL = "https://www.mac.bid";
@@ -271,7 +293,10 @@ export class MacBid {
           if (error instanceof MacBidUnavailableError) {
             throw error;
           }
-          console.warn("Failed to refresh token, attempting login:", error);
+          console.warn(
+            "Failed to refresh token, attempting login:",
+            error instanceof Error ? error.message : String(error)
+          );
           this.clearLoginSession();
         }
       } else {
@@ -292,7 +317,10 @@ export class MacBid {
           if (error instanceof MacBidUnavailableError) {
             throw error;
           }
-          console.warn("Failed to refresh token, attempting login:", error);
+          console.warn(
+            "Failed to refresh token, attempting login:",
+            error instanceof Error ? error.message : String(error)
+          );
           this.clearLoginSession();
         }
       }
@@ -341,7 +369,8 @@ export class MacBid {
     // 5xx is an outage; 429 means retry later
     if (res.status >= 500 || res.status === 429) {
       throw new MacBidUnavailableError(
-        `Mac.Bid returned HTTP ${res.status} for ${path}`
+        `Mac.Bid returned HTTP ${res.status} for ${path}`,
+        { retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) }
       );
     }
     // Null-body statuses must not be given a body
