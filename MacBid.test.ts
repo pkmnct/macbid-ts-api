@@ -348,4 +348,52 @@ describe("odd answers from Mac.Bid", () => {
     assert.equal(seen.authorization, "old");
     assert.equal(seen["content-type"], "application/json");
   });
+
+  it("leaves the session untouched when a refresh answer has a bad expiry", async () => {
+    handlers["PUT /auth/refresh-token"] = () => ({
+      status: 200,
+      json: {
+        access_token: "new",
+        refresh_token: "refresh-2",
+        expires: Math.floor(Date.now() / 1000) + 3600,
+        expiration_refresh: "soon",
+      },
+    });
+    const api = await signedInClient();
+
+    await assert.rejects(api.refreshToken(), /expiration_refresh/);
+    const state = api.getAuthState();
+    assert.equal(state.token, "old");
+    assert.equal(state.refresh_token, "refresh-1");
+  });
+
+  it("reports 'Not authenticated' before the user_id check", async () => {
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await assert.rejects(api.get_watchlist(), /Not authenticated/);
+    await assert.rejects(api.get_active(), /Not authenticated/);
+  });
+
+  it("does not send an expired token to a public endpoint", async () => {
+    let auth: string | undefined = "unset";
+    handlers["GET /buildings"] = (req) => {
+      auth = req.headers.authorization;
+      return { status: 200, json: [] };
+    };
+    const api = await signedInClient();
+    (api as unknown as { auth_info: { token_expiration: Date } }).auth_info.token_expiration =
+      future(-60);
+
+    await api.get_buildings();
+    assert.equal(auth, undefined);
+    assert.equal(count("PUT /auth/refresh-token"), 0);
+  });
+
+  it("returns the body bytes unchanged", async () => {
+    handlers["GET /file"] = () => ({ status: 200, raw: "héllo" });
+    const api = await signedInClient();
+    const res = await api.get("/file");
+    assert.equal(new TextDecoder().decode(await res.arrayBuffer()), "héllo");
+    assert.equal(await res.text(), "héllo");
+  });
 });

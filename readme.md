@@ -59,6 +59,12 @@ For JSON storage, use `MacBid.serializeAuthState` / `MacBid.parseAuthState`.
 
 `AuthInfo` is the type for `authenticate()` params (credentials, `validation_code`, etc.). `SerializableAuthState` is what comes back — safe to persist.
 
+### Upgrading from 1.x
+
+- Node 22 or newer; no runtime dependencies (`node-fetch` is gone).
+- `get_watchlist`, `get_active`, `get_buildings` and `get_locations` throw on an HTTP error instead of returning the error body as data. See [Errors](#errors).
+- `get` / `post` return a `MacBidApiResponse` (`status`, `statusText`, `ok`, `headers`, `text()`, `json()`, `arrayBuffer()`), not a `Response`: there is no `clone()`, `body`, `blob()` or `formData()`. The body is read in full under the request timeout.
+
 ### Errors
 
 - `MacBidUnavailableError`: Mac.Bid could not be reached, timed out, or answered with a 5xx or 429 (`retryAfterMs` is set when it sent `Retry-After`). The session is unaffected: keep the saved state and retry later.

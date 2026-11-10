@@ -157,7 +157,7 @@ export interface Location {
 }
 
 /**
- * What the low-level \`get\` and \`post\` return: the status and headers of
+ * What the low-level `get` and `post` return: the status and headers of
  * Mac.Bid's answer and its body, already read in full.
  */
 export interface MacBidApiResponse {
@@ -165,6 +165,7 @@ export interface MacBidApiResponse {
   statusText: string;
   ok: boolean;
   headers: Headers;
+  arrayBuffer: () => Promise<ArrayBuffer>;
   text: () => Promise<string>;
   json: () => Promise<{
     [key: string]: unknown;
@@ -359,7 +360,7 @@ export class MacBid {
       : timeout;
 
     let res: Response;
-    let text: string;
+    let bytes: ArrayBuffer;
     try {
       res = await fetch(this.API_ROOT + path, {
         headers: this.macbid_session_headers,
@@ -368,7 +369,7 @@ export class MacBid {
       });
       // Read the body here so a stall or reset mid-body is also reported as
       // MacBidUnavailableError rather than escaping from a later res.json()
-      text = await res.text();
+      bytes = await res.arrayBuffer();
     } catch (error) {
       // The caller cancelled this request: that is not an outage
       if (options.signal?.aborted) {
@@ -391,8 +392,10 @@ export class MacBid {
       statusText: res.statusText,
       ok: res.ok,
       headers: res.headers,
-      text: async () => text,
-      json: async () => JSON.parse(text) as { [key: string]: unknown },
+      arrayBuffer: async () => bytes,
+      text: async () => new TextDecoder().decode(bytes),
+      json: async () =>
+        JSON.parse(new TextDecoder().decode(bytes)) as { [key: string]: unknown },
     };
   };
 
@@ -439,6 +442,7 @@ export class MacBid {
 
   /** The signed-in user's id, for the per-user endpoints. */
   private requireUserId = (): string => {
+    this.check_auth();
     const userId = this.auth_info.user_id;
     if (!userId) {
       throw new Error(
@@ -458,7 +462,11 @@ export class MacBid {
       await this.ensureValidToken();
     }
     const sentWith = this.macbid_session_headers["Authorization"];
-    let res = await this.request(path);
+    // A public endpoint gets the token only while it is still good: a stale one
+    // could make Mac.Bid refuse a request that needs no login
+    const publicOptions: RequestInit | undefined =
+      userSpecific || !this.isTokenExpired() ? undefined : { headers: {} };
+    let res = await this.request(path, publicOptions);
     if (
       userSpecific &&
       (res.status === 401 || res.status === 403) &&
@@ -526,7 +534,7 @@ export class MacBid {
 
   /**
    * Low-level GET with the session's token (refreshed when it has expired). It
-   * returns whatever Mac.Bid answers: unlike the \`get_*\` methods it does not
+   * returns whatever Mac.Bid answers: unlike the `get_*` methods it does not
    * retry a rejected token or clear a dead session, and does not throw on 4xx.
    */
   public get = async (
@@ -540,7 +548,7 @@ export class MacBid {
     });
   };
 
-  /** Low-level POST; see \`get\`. Caller headers are added to the session headers. */
+  /** Low-level POST; see `get`. Caller headers are added to the session headers. */
   public post = async (
     path: string,
     options?: RequestInit
@@ -831,7 +839,12 @@ export class MacBid {
     const expiration_refresh = resJson["expiration_refresh"];
 
     if (access_token) {
+      // Validate everything first: a bad value must not leave the session
+      // half-updated, with a rotated refresh token that nobody keeps
       const token_expiration = this.expiryDate(resJson["expires"], "expires");
+      const refresh_token_expiration = expiration_refresh
+        ? this.expiryDate(expiration_refresh, "expiration_refresh")
+        : undefined;
       this.auth_info.token = access_token;
       this.macbid_session_headers["Authorization"] = this.auth_info.token;
       this.auth_info.token_expiration = token_expiration;
@@ -840,11 +853,8 @@ export class MacBid {
       if (refresh_token) {
         this.auth_info.refresh_token = refresh_token;
       }
-      if (expiration_refresh) {
-        this.auth_info.refresh_token_expiration = this.expiryDate(
-          expiration_refresh,
-          "expiration_refresh"
-        );
+      if (refresh_token_expiration) {
+        this.auth_info.refresh_token_expiration = refresh_token_expiration;
       }
 
       return true;
