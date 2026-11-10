@@ -162,6 +162,14 @@ export interface MacBidApiResponse extends Response {
   }>;
 }
 
+/**
+ * Mac.Bid could not be reached, timed out, or answered with a server error.
+ * The saved session is not affected, so the same call can simply be retried.
+ */
+export class MacBidUnavailableError extends Error {
+  override name = "MacBidUnavailableError";
+}
+
 export class MacBid {
   public LOGIN_PAGE_URL = "https://www.mac.bid";
   public API_ROOT = "https://api.macdiscount.com";
@@ -259,6 +267,10 @@ export class MacBid {
           await this.refreshToken();
           return this.getAuthState();
         } catch (error) {
+          // An outage says nothing about the session: keep it and let the caller retry
+          if (error instanceof MacBidUnavailableError) {
+            throw error;
+          }
           console.warn("Failed to refresh token, attempting login:", error);
           this.clearLoginSession();
         }
@@ -276,6 +288,10 @@ export class MacBid {
           console.log("Successfully refreshed token");
           return this.getAuthState();
         } catch (error) {
+          // An outage says nothing about the session: keep it and let the caller retry
+          if (error instanceof MacBidUnavailableError) {
+            throw error;
+          }
           console.warn("Failed to refresh token, attempting login:", error);
           this.clearLoginSession();
         }
@@ -294,12 +310,27 @@ export class MacBid {
   private request = async (
     path: string,
     options: RequestInit = {}
-  ): Promise<MacBidApiResponse> =>
-    (await fetch(this.API_ROOT + path, {
-      headers: this.macbid_session_headers,
-      signal: AbortSignal.timeout(this.REQUEST_TIMEOUT_MS),
-      ...options,
-    })) as MacBidApiResponse;
+  ): Promise<MacBidApiResponse> => {
+    let res: Response;
+    try {
+      res = await fetch(this.API_ROOT + path, {
+        headers: this.macbid_session_headers,
+        signal: AbortSignal.timeout(this.REQUEST_TIMEOUT_MS),
+        ...options,
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new MacBidUnavailableError(`Could not reach Mac.Bid: ${reason}`, {
+        cause: error,
+      });
+    }
+    if (res.status >= 500) {
+      throw new MacBidUnavailableError(
+        `Mac.Bid returned HTTP ${res.status} for ${path}`
+      );
+    }
+    return res as MacBidApiResponse;
+  };
 
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
   private getJson = async <T>(path: string): Promise<T> => {
