@@ -183,6 +183,23 @@ export class MacBidUnavailableError extends Error {
   }
 }
 
+/**
+ * Mac.Bid refused the session (HTTP 401 or 403): the tokens were revoked or
+ * are no longer valid, even if they have not reached their expiry time. The
+ * client has already dropped them, so discard any saved session and sign in
+ * again.
+ */
+export class MacBidAuthError extends Error {
+  override name = "MacBidAuthError";
+  /** The HTTP status Mac.Bid answered with. */
+  status: number;
+
+  constructor(message: string, options: ErrorOptions & { status: number }) {
+    super(message, options);
+    this.status = options.status;
+  }
+}
+
 /** Parse a Retry-After header: delay in seconds, or an HTTP date. */
 const parseRetryAfter = (value: string | null): number | undefined => {
   if (!value) return undefined;
@@ -254,6 +271,15 @@ export class MacBid {
     delete this.auth_info.device_id;
     delete this.auth_info.validation_code;
     delete this.macbid_session_headers["Authorization"];
+  };
+
+  /**
+   * Forget the current login: tokens, device_id and any validation code. Keeps
+   * the email and password. Use it to start a sign-in over, e.g. to request a
+   * new code, without building a new client.
+   */
+  public resetSession = (): void => {
+    this.clearLoginSession();
   };
 
   /** device_id saved without tokens means an SMS was sent and we're waiting for the code. */
@@ -387,13 +413,60 @@ export class MacBid {
   };
 
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
-  private getJson = async <T>(path: string): Promise<T> => {
+  private getJson = async <T>(
+    path: string,
+    { userSpecific = true }: { userSpecific?: boolean } = {}
+  ): Promise<T> => {
     this.check_auth();
-    const res = await this.get(path);
+    let res = await this.get(path);
+    if (
+      userSpecific &&
+      (res.status === 401 || res.status === 403) &&
+      this.auth_info.refresh_token &&
+      !this.isRefreshTokenExpired()
+    ) {
+      // The access token can be rejected while it still looks valid (revoked,
+      // rotated elsewhere, clock skew): get a new one and retry once before
+      // giving up on the whole session
+      try {
+        await this.refreshToken();
+        res = await this.get(path);
+      } catch (error) {
+        if (error instanceof MacBidUnavailableError) {
+          // Mac.Bid is unreachable: says nothing about the session
+          throw error;
+        }
+        // The refresh was refused too: fall through with the original answer
+      }
+    }
+    if (userSpecific && (res.status === 401 || res.status === 403)) {
+      // The session is dead: keeping the tokens would make the next
+      // authenticate() reuse them as long as they look unexpired
+      this.clearLoginSession();
+      throw new MacBidAuthError(
+        `Mac.Bid rejected the session (HTTP ${res.status}) for ${path}`,
+        { status: res.status }
+      );
+    }
     if (!res.ok) {
       throw new Error(`Mac.Bid returned HTTP ${res.status} for ${path}`);
     }
     return (await res.json()) as T;
+  };
+
+  /** Like getJson, for endpoints that answer with a list. */
+  private getJsonArray = async <T>(
+    path: string,
+    what: string,
+    options?: { userSpecific?: boolean }
+  ): Promise<T[]> => {
+    const body = await this.getJson<unknown>(path, options);
+    if (!Array.isArray(body)) {
+      throw new Error(
+        `Mac.Bid ${what} response is not a list; the API may have changed`
+      );
+    }
+    return body as T[];
   };
 
   public get = async (path: string): Promise<MacBidApiResponse> => {
@@ -474,6 +547,9 @@ export class MacBid {
           "Validation code was already used. Clear saved auth state and authenticate again to request a new code."
         );
       }
+      // Keep the device_id (the SMS is still good) but forget the rejected code,
+      // or every later authenticate() would send it again
+      delete this.auth_info.validation_code;
       throw new Error(`Validation failed: ${errorMessage || "Unknown error"}`);
     }
 
@@ -598,7 +674,20 @@ export class MacBid {
   /**
    * Refresh the access token using the refresh token
    */
-  public refreshToken = async (): Promise<boolean> => {
+  public refreshToken = (): Promise<boolean> => {
+    // Refresh tokens rotate: two refreshes at once would make the second one
+    // fail with a token the first has just replaced. Share the one in flight.
+    this.refreshing ??= this.doRefreshToken().finally(() => {
+      this.refreshing = undefined;
+    });
+    return this.refreshing;
+  };
+
+  private refreshing: Promise<boolean> | undefined;
+
+  private warnedEmptyWatchlist = false;
+
+  private doRefreshToken = async (): Promise<boolean> => {
     if (!this.auth_info.refresh_token) {
       throw new Error("No refresh token available. Please login again.");
     }
@@ -635,6 +724,15 @@ export class MacBid {
       expires?: number;
       expiration_refresh?: number;
     };
+
+    if (res.status === 400 || res.status === 401 || res.status === 403) {
+      // Mac.Bid does not accept this refresh token: the session is over
+      this.clearLoginSession();
+      throw new MacBidAuthError(
+        `Mac.Bid refused the refresh token (HTTP ${res.status})`,
+        { status: res.status }
+      );
+    }
 
     if (!res.ok || resJson.error) {
       throw new Error(
@@ -682,9 +780,20 @@ export class MacBid {
     const body = await this.getJson<{ watchlist_full?: WatchlistFull[] }>(
       `/auctions/customer/${this.auth_info["user_id"]}/active-auctions`
     );
+    if (body.watchlist_full == null) {
+      // An account with nothing on its watchlist may omit the list. Say so in
+      // the log (once per client), so a renamed field would not go unnoticed.
+      if (!this.warnedEmptyWatchlist) {
+        this.warnedEmptyWatchlist = true;
+        console.warn(
+          "Mac.Bid watchlist response has no watchlist_full; treating it as empty"
+        );
+      }
+      return [];
+    }
     if (!Array.isArray(body.watchlist_full)) {
       throw new Error(
-        "Mac.Bid watchlist response is missing watchlist_full; the API may have changed"
+        "Mac.Bid watchlist_full is not a list; the API may have changed"
       );
     }
     return body.watchlist_full;
@@ -694,19 +803,26 @@ export class MacBid {
    * Returns the logged in user's active won items (e.g. awaiting pickup).
    */
   public get_active = async (): Promise<ActiveItem[]> =>
-    this.getJson<ActiveItem[]>(`/user/${this.auth_info["user_id"]}/active`);
+    this.getJsonArray<ActiveItem>(
+      `/user/${this.auth_info["user_id"]}/active`,
+      "active items"
+    );
 
   /**
    * Returns all Mac.Bid warehouse buildings.
    */
   public get_buildings = async (): Promise<Building[]> =>
-    this.getJson<Building[]>("/buildings");
+    this.getJsonArray<Building>("/buildings", "buildings", {
+      userSpecific: false,
+    });
 
   /**
    * Returns all Mac.Bid pickup locations.
    */
   public get_locations = async (): Promise<Location[]> =>
-    this.getJson<Location[]>("/locations");
+    this.getJsonArray<Location>("/locations", "locations", {
+      userSpecific: false,
+    });
 }
 
 export default MacBid;
