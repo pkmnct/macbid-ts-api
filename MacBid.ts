@@ -311,25 +311,50 @@ export class MacBid {
     path: string,
     options: RequestInit = {}
   ): Promise<MacBidApiResponse> => {
+    // Keep the timeout even when the caller brings its own signal
+    const timeout = AbortSignal.timeout(this.REQUEST_TIMEOUT_MS);
+    const signal = options.signal
+      ? AbortSignal.any([timeout, options.signal])
+      : timeout;
+
     let res: Response;
+    let body: ArrayBuffer;
     try {
       res = await fetch(this.API_ROOT + path, {
         headers: this.macbid_session_headers,
-        signal: AbortSignal.timeout(this.REQUEST_TIMEOUT_MS),
         ...options,
+        signal,
       });
+      // Read the body here so a stall or reset mid-body is also reported as
+      // MacBidUnavailableError rather than escaping from a later res.json()
+      body = await res.arrayBuffer();
     } catch (error) {
+      // The caller cancelled this request: that is not an outage
+      if (options.signal?.aborted) {
+        throw error;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       throw new MacBidUnavailableError(`Could not reach Mac.Bid: ${reason}`, {
         cause: error,
       });
     }
-    if (res.status >= 500) {
+    // 5xx is an outage; 429 means retry later
+    if (res.status >= 500 || res.status === 429) {
       throw new MacBidUnavailableError(
         `Mac.Bid returned HTTP ${res.status} for ${path}`
       );
     }
-    return res as MacBidApiResponse;
+    // Null-body statuses must not be given a body
+    const nullBody = [101, 204, 205, 304].includes(res.status);
+    // fetch already decoded the body, so these headers no longer describe it
+    const headers = new Headers(res.headers);
+    headers.delete("content-encoding");
+    headers.delete("content-length");
+    return new Response(nullBody ? null : body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers,
+    }) as MacBidApiResponse;
   };
 
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
@@ -628,7 +653,12 @@ export class MacBid {
     const body = await this.getJson<{ watchlist_full?: WatchlistFull[] }>(
       `/auctions/customer/${this.auth_info["user_id"]}/active-auctions`
     );
-    return body.watchlist_full ?? [];
+    if (!Array.isArray(body.watchlist_full)) {
+      throw new Error(
+        "Mac.Bid watchlist response is missing watchlist_full; the API may have changed"
+      );
+    }
+    return body.watchlist_full;
   };
 
   /**
