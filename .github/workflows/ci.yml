@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: build (Node ${{ matrix.node-version }})
@@ -12,30 +19,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Matches engines.node in package.json (>=16.0.0)
-        node-version: [16, 18, 20, 22, 24]
+        # Matches engines.node in package.json (>=22)
+        node-version: [22, 24, 26]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run build
+      - run: npm test
 
   lint:
     name: lint
     runs-on: ubuntu-latest
-    # ESLint 10 requires Node >=20.19, 22.13, or >=24
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 22
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run lint
