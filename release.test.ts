@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 // Runs the release plugins' commit analysis and release-notes generation with
 // the repository's own .releaserc.json, so a preset/writer mismatch or a
@@ -80,7 +80,6 @@ describe("release configuration", () => {
     // conventional-changelog-writer N. A semantic-release update that moves
     // the bundled writer fails here, which is the prompt to move the preset
     // (and the Dependabot ignore rule) to the next major.
-    const require = createRequire(import.meta.url);
     // package.json is not exported by these packages: walk up from the entry
     // file to the node_modules folder that holds the dependency
     const versionFrom = (entry: string, name: string): number => {
@@ -95,8 +94,14 @@ describe("release configuration", () => {
       }
       throw new Error(`${name} not found from ${entry}`);
     };
-    const pluginEntry = require.resolve("@semantic-release/release-notes-generator");
-    const presetEntry = require.resolve("conventional-changelog-conventionalcommits");
+    // import.meta.resolve honours the "import" condition, so ESM-only
+    // packages (preset 10+) resolve too
+    const pluginEntry = fileURLToPath(
+      import.meta.resolve("@semantic-release/release-notes-generator")
+    );
+    const presetEntry = fileURLToPath(
+      import.meta.resolve("conventional-changelog-conventionalcommits")
+    );
 
     const writer = versionFrom(pluginEntry, "conventional-changelog-writer");
     const preset = versionFrom(
