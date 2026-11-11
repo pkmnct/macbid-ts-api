@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 
 // Runs the release plugins' commit analysis and release-notes generation with
@@ -68,7 +70,43 @@ describe("release configuration", () => {
       }
     );
 
-    assert.match(notes, /## \[2\.0\.0\]/);
-    assert.match(notes, /BREAKING CHANGES/);
+    assert.match(notes, /## \[2\.0\.0\]\(.*compare\/v1\.1\.0\.\.\.v2\.0\.0\)/);
+    assert.match(notes, /### ⚠ BREAKING CHANGES\s+\* Node 22\+/);
+    assert.match(notes, /### Features\s+\* drop node 16 .*9aea501/);
+  });
+
+  it("pairs the notes preset with the writer the release plugin bundles", () => {
+    // conventional-changelog-conventionalcommits N+1 needs
+    // conventional-changelog-writer N. A semantic-release update that moves
+    // the bundled writer fails here, which is the prompt to move the preset
+    // (and the Dependabot ignore rule) to the next major.
+    const require = createRequire(import.meta.url);
+    // package.json is not exported by these packages: walk up from the entry
+    // file to the node_modules folder that holds the dependency
+    const versionFrom = (entry: string, name: string): number => {
+      for (let dir = dirname(entry); dir !== dirname(dir); dir = dirname(dir)) {
+        const file = join(dir, "node_modules", name, "package.json");
+        if (existsSync(file)) {
+          const { version } = JSON.parse(readFileSync(file, "utf8")) as {
+            version: string;
+          };
+          return Number(version.split(".")[0]);
+        }
+      }
+      throw new Error(`${name} not found from ${entry}`);
+    };
+    const pluginEntry = require.resolve("@semantic-release/release-notes-generator");
+    const presetEntry = require.resolve("conventional-changelog-conventionalcommits");
+
+    const writer = versionFrom(pluginEntry, "conventional-changelog-writer");
+    const preset = versionFrom(
+      presetEntry,
+      "conventional-changelog-conventionalcommits"
+    );
+    assert.equal(
+      preset,
+      writer + 1,
+      `conventional-changelog-writer ${writer} is bundled, so the preset must be ${writer + 1}.x (it is ${preset}.x): update the preset and the ignore rule in .github/dependabot.yml`
+    );
   });
 });
