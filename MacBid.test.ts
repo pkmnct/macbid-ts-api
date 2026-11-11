@@ -11,6 +11,7 @@ type Handler = (
   status: number;
   json?: unknown;
   raw?: string;
+  bytes?: Buffer;
   headers?: Record<string, string>;
 };
 
@@ -38,7 +39,7 @@ before(async () => {
         "Content-Type": "application/json",
         ...out.headers,
       });
-      res.end(out.raw ?? JSON.stringify(out.json ?? {}));
+      res.end(out.bytes ?? out.raw ?? JSON.stringify(out.json ?? {}));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -395,5 +396,30 @@ describe("odd answers from Mac.Bid", () => {
     const res = await api.get("/file");
     assert.equal(new TextDecoder().decode(await res.arrayBuffer()), "héllo");
     assert.equal(await res.text(), "héllo");
+  });
+});
+
+describe("response text decoding", () => {
+  const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9]); // "café" in ISO-8859-1
+
+  it("uses the charset the response declares", async () => {
+    handlers["GET /x"] = () => ({
+      status: 200,
+      bytes: latin1,
+      headers: { "Content-Type": 'text/plain; charset="ISO-8859-1"' },
+    });
+    const client = await signedInClient();
+    const res = await client.get("/x");
+    assert.equal(await res.text(), "café");
+  });
+
+  it("falls back to UTF-8 for an unknown or missing charset", async () => {
+    handlers["GET /x"] = () => ({
+      status: 200,
+      raw: "café",
+      headers: { "Content-Type": "text/plain; charset=nonsense" },
+    });
+    const client = await signedInClient();
+    assert.equal(await (await client.get("/x")).text(), "café");
   });
 });

@@ -117,3 +117,18 @@ npm run lint
 ## License
 
 MIT
+
+## Releases
+
+Releases are automatic. Pull requests are squash-merged and the PR title must be a [conventional commit](https://www.conventionalcommits.org) (checked in CI). On every merge to `main`, semantic-release picks the next version from it, publishes to npm and creates a GitHub release:
+
+| Title | Release |
+| --- | --- |
+| `fix: ...` | patch |
+| `feat: ...` | minor |
+| `feat!: ...` or a `BREAKING CHANGE:` footer | major |
+| `docs:`, `chore:`, `ci:`, `test:`, ... | none |
+
+A release starts only after the CI workflow has passed on `main`, and is published with npm provenance. It needs no npm token: the package must list `pkmnct/macbid-ts-api` and the workflow `release.yml` as a [trusted publisher](https://docs.npmjs.com/trusted-publishers) on npmjs.com. The repository must also squash-merge with the PR title as the commit message.
+
+The version in `package.json` is not edited in the repository; the published package carries the real one.

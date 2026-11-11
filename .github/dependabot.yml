@@ -10,6 +10,10 @@ updates:
     # version is usually pulled first
     cooldown:
       default-days: 5
+    # Titles must be conventional commits (see the PR title check)
+    commit-message:
+      prefix: chore
+      include: scope
     groups:
       development:
         dependency-type: development
@@ -26,6 +30,18 @@ updates:
       day: monday
     cooldown:
       default-days: 5
+    commit-message:
+      prefix: ci
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /.github/commitlint
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: ci

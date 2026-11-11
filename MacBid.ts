@@ -387,15 +387,26 @@ export class MacBid {
         { retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) }
       );
     }
+    // Decode with the charset the response declares; UTF-8 when it names none
+    // or one this runtime does not know
+    const charset = /;\s*charset\s*=\s*"?([^";\s]+)/i.exec(
+      res.headers.get("content-type") ?? ""
+    )?.[1];
+    const text = async (): Promise<string> => {
+      try {
+        return new TextDecoder(charset).decode(bytes);
+      } catch {
+        return new TextDecoder().decode(bytes);
+      }
+    };
     return {
       status: res.status,
       statusText: res.statusText,
       ok: res.ok,
       headers: res.headers,
       arrayBuffer: async () => bytes,
-      text: async () => new TextDecoder().decode(bytes),
-      json: async () =>
-        JSON.parse(new TextDecoder().decode(bytes)) as { [key: string]: unknown },
+      text,
+      json: async () => JSON.parse(await text()) as { [key: string]: unknown },
     };
   };
 
