@@ -28,7 +28,7 @@
         "typecheck": "tsc --noEmit",
         "lint": "eslint .",
         "prepublishOnly": "npm run build",
-        "test": "tsc && node --test MacBid.test.js"
+        "test": "tsc && node --test MacBid.test.js release.test.js"
     },
     "type": "module",
     "main": "index.js",
