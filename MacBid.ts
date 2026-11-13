@@ -248,8 +248,9 @@ export class MacBidAuthError extends Error {
 }
 
 /**
- * Mac.Bid answered 404: what was asked for does not exist (for `get_lot`, a
- * lot that was removed or a wrong id). The session is unaffected.
+ * `get_lot` got a 404: Mac.Bid has no such lot (removed, or a wrong id). The
+ * session is unaffected. Other calls throw a plain Error on 404, since there
+ * it more likely means the endpoint moved. A 404 for every lot means the same.
  */
 export class MacBidNotFoundError extends Error {
   override name = "MacBidNotFoundError";
@@ -261,6 +262,10 @@ export class MacBidNotFoundError extends Error {
     this.path = options.path;
   }
 }
+
+/** An ISO 8601 date-time with a zone, such as 2026-11-17T00:35:59.000Z. */
+const ISO_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 /** Parse a Retry-After header: delay in seconds, or an HTTP date. */
 const parseRetryAfter = (value: string | null): number | undefined => {
@@ -518,7 +523,14 @@ export class MacBid {
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
   private getJson = async <T>(
     path: string,
-    { userSpecific = true }: { userSpecific?: boolean } = {}
+    {
+      userSpecific = true,
+      notFound = false,
+    }: {
+      userSpecific?: boolean;
+      /** Raise MacBidNotFoundError on 404, for a path that names one item. */
+      notFound?: boolean;
+    } = {}
   ): Promise<T> => {
     if (userSpecific) {
       this.check_auth();
@@ -563,7 +575,7 @@ export class MacBid {
         { status: res.status }
       );
     }
-    if (res.status === 404) {
+    if (notFound && res.status === 404) {
       throw new MacBidNotFoundError(`Mac.Bid returned HTTP 404 for ${path}`, {
         path,
       });
@@ -978,15 +990,18 @@ export class MacBid {
     if (!/^[1-9]\d*$/.test(id)) {
       throw new Error(`Not a Mac.Bid lot id: ${id}`);
     }
-    const body = await this.getJson<unknown>(`/map-bid/ddb/lot/${id}`);
+    const body = await this.getJson<unknown>(`/map-bid/ddb/lot/${id}`, {
+      notFound: true,
+    });
     const endTime =
       typeof body === "object" && body !== null && !Array.isArray(body)
         ? (body as { end_time?: unknown }).end_time
         : undefined;
-    // An instant needs a zone: without one, Date.parse reads local time
+    // The whole ISO shape with a zone: Date.parse alone accepts junk such as
+    // "0Z", and reads a time without a zone as local time
     if (
       typeof endTime !== "string" ||
-      !/(Z|[+-]\d{2}:?\d{2})$/i.test(endTime) ||
+      !ISO_INSTANT.test(endTime) ||
       Number.isNaN(Date.parse(endTime))
     ) {
       throw new Error(

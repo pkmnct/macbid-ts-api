@@ -254,6 +254,12 @@ describe("get_lot", () => {
       "2026-11-16 19:35:59", // no zone: would be read as local time
       "2026-11-16T19:35:59", // the same, ISO style
       "not a dateZ",
+      "0Z", // Date.parse: 1 January 2000
+      "-1000", // Date.parse: the year 1000, local time
+      "Nov 17 2026 00:35:59 -0500",
+      "2026-11-17T00:35:59z",
+      "2026-11-17T00:35:59+0000",
+      "2026-13-45T99:99:99Z", // the right shape, but not a date
     ]) {
       handlers["GET /map-bid/ddb/lot/5"] = () => ({
         status: 200,
@@ -296,6 +302,24 @@ describe("get_lot", () => {
       return true;
     });
     assert.equal(api.getAuthState().token, "old");
+  });
+
+  it("leaves a 404 from the other calls a plain Error (the endpoint may have moved)", async () => {
+    const api = await signedInClient();
+    const endpoints: [string, () => Promise<unknown>][] = [
+      ["GET /auctions/customer/7/active-auctions", api.get_watchlist],
+      ["GET /user/7/active", api.get_active],
+      ["GET /buildings", api.get_buildings],
+      ["GET /locations", api.get_locations],
+    ];
+    for (const [key, call] of endpoints) {
+      handlers[key] = () => ({ status: 404, json: { message: "Not Found" } });
+      await assert.rejects(call(), (error: unknown) => {
+        assert.ok(!(error instanceof MacBidNotFoundError), key);
+        assert.match((error as Error).message, /HTTP 404/);
+        return true;
+      });
+    }
   });
 
   it("throws a plain Error for other HTTP errors", async () => {
