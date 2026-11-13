@@ -31,10 +31,11 @@ export interface WatchlistFull {
   closed_date: null;
   buyers_assurance_cost: number | null;
   /**
-   * The scheduled close as Mac.Bid's wall-clock digits marked "Z", not a UTC
-   * instant. In this endpoint they have been seen an hour ahead of the Eastern
-   * time the site shows (in November), and they do not follow bid extensions.
-   * For the real close time use `get_lot(auction_lot_id)` and its `end_time`.
+   * Not a UTC instant: wall-clock digits marked "Z", sent as an ISO string
+   * (the `Date` type is historical). They have not matched the time the site
+   * shows (in November 2026 they were an hour ahead of Eastern time; the
+   * offset in summer is unknown) and they do not follow bid extensions. For
+   * the real close time use `get_lot(auction_lot_id)` and its `end_time`.
    */
   expected_close_date: Date;
   inventory_id: number;
@@ -68,11 +69,15 @@ export interface WatchlistFull {
 
 /**
  * A lot's live bidding state, the data behind the countdown on its page. The
- * times are real UTC instants. Mac.Bid sends most numbers here as strings.
+ * times are real UTC instants. Mac.Bid sends most numbers here as strings,
+ * unlike the watchlist: compare ids with `Number(...)`. Only `end_time` is
+ * checked; the other fields are as Mac.Bid sent them.
  */
 export interface LotStatus {
+  /** The watchlist's `auction_lot_id`. */
   lot_id: number;
   lot_number: string;
+  /** A string here; `WatchlistFull.auction_id` is a number. */
   auction_id: string;
   location_id: string;
   title: string;
@@ -239,6 +244,21 @@ export class MacBidAuthError extends Error {
   constructor(message: string, options: ErrorOptions & { status: number }) {
     super(message, options);
     this.status = options.status;
+  }
+}
+
+/**
+ * Mac.Bid answered 404: what was asked for does not exist (for `get_lot`, a
+ * lot that was removed or a wrong id). The session is unaffected.
+ */
+export class MacBidNotFoundError extends Error {
+  override name = "MacBidNotFoundError";
+  /** The path that was not found. */
+  path: string;
+
+  constructor(message: string, options: ErrorOptions & { path: string }) {
+    super(message, options);
+    this.path = options.path;
   }
 }
 
@@ -542,6 +562,11 @@ export class MacBid {
         `Mac.Bid rejected the session (HTTP ${res.status}) for ${path}`,
         { status: res.status }
       );
+    }
+    if (res.status === 404) {
+      throw new MacBidNotFoundError(`Mac.Bid returned HTTP 404 for ${path}`, {
+        path,
+      });
     }
     if (!res.ok) {
       throw new Error(`Mac.Bid returned HTTP ${res.status} for ${path}`);
@@ -945,6 +970,8 @@ export class MacBid {
    * Returns a lot's live bidding state, including `end_time`: when bidding
    * really ends, as a UTC instant. Needs a login. `lotId` is the lot's numeric
    * id (`auction_lot_id` in the watchlist), not its lot number such as "2230R".
+   * Throws `MacBidNotFoundError` when Mac.Bid has no such lot. Each call is
+   * one request: for many lots, limit how many run at once.
    */
   public get_lot = async (lotId: number | string): Promise<LotStatus> => {
     const id = String(lotId);
@@ -952,14 +979,18 @@ export class MacBid {
       throw new Error(`Not a Mac.Bid lot id: ${id}`);
     }
     const body = await this.getJson<unknown>(`/map-bid/ddb/lot/${id}`);
+    const endTime =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as { end_time?: unknown }).end_time
+        : undefined;
+    // An instant needs a zone: without one, Date.parse reads local time
     if (
-      typeof body !== "object" ||
-      body === null ||
-      Array.isArray(body) ||
-      typeof (body as { end_time?: unknown }).end_time !== "string"
+      typeof endTime !== "string" ||
+      !/(Z|[+-]\d{2}:?\d{2})$/i.test(endTime) ||
+      Number.isNaN(Date.parse(endTime))
     ) {
       throw new Error(
-        "Mac.Bid lot response has no end_time; the API may have changed"
+        "Mac.Bid lot response has no usable end_time; the API may have changed"
       );
     }
     return body as LotStatus;
