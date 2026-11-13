@@ -265,7 +265,35 @@ export class MacBidNotFoundError extends Error {
 
 /** An ISO 8601 date-time with a zone, such as 2026-11-17T00:35:59.000Z. */
 const ISO_INSTANT =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+/**
+ * Whether `value` is an ISO 8601 date-time with a zone that names a real
+ * moment. Date.parse alone accepts junk such as "0Z", reads a time without a
+ * zone as local time, and rolls impossible dates over (31 February to
+ * 3 March, 24:00 to the next day): the digits must survive the round trip.
+ */
+const isIsoInstant = (value: string): boolean => {
+  const match = ISO_INSTANT.exec(value);
+  const ms = Date.parse(value);
+  if (!match || Number.isNaN(ms)) {
+    return false;
+  }
+  const [, year, month, day, hour, minute, second, sign, offH, offM] = match;
+  const offsetMinutes = sign
+    ? (sign === "-" ? -1 : 1) * (Number(offH) * 60 + Number(offM))
+    : 0;
+  // The instant as the clock in the value's own zone shows it
+  const shown = new Date(ms + offsetMinutes * 60_000);
+  return (
+    shown.getUTCFullYear() === Number(year) &&
+    shown.getUTCMonth() + 1 === Number(month) &&
+    shown.getUTCDate() === Number(day) &&
+    shown.getUTCHours() === Number(hour) &&
+    shown.getUTCMinutes() === Number(minute) &&
+    shown.getUTCSeconds() === Number(second)
+  );
+};
 
 /** Parse a Retry-After header: delay in seconds, or an HTTP date. */
 const parseRetryAfter = (value: string | null): number | undefined => {
@@ -997,13 +1025,7 @@ export class MacBid {
       typeof body === "object" && body !== null && !Array.isArray(body)
         ? (body as { end_time?: unknown }).end_time
         : undefined;
-    // The whole ISO shape with a zone: Date.parse alone accepts junk such as
-    // "0Z", and reads a time without a zone as local time
-    if (
-      typeof endTime !== "string" ||
-      !ISO_INSTANT.test(endTime) ||
-      Number.isNaN(Date.parse(endTime))
-    ) {
+    if (typeof endTime !== "string" || !isIsoInstant(endTime)) {
       throw new Error(
         "Mac.Bid lot response has no usable end_time; the API may have changed"
       );

@@ -260,6 +260,9 @@ describe("get_lot", () => {
       "2026-11-17T00:35:59z",
       "2026-11-17T00:35:59+0000",
       "2026-13-45T99:99:99Z", // the right shape, but not a date
+      "2026-02-31T00:00:00Z", // Date.parse: 3 March
+      "2026-11-17T24:00:00Z", // Date.parse: midnight on the 18th
+      "2026-11-16T19:35:60-05:00",
     ]) {
       handlers["GET /map-bid/ddb/lot/5"] = () => ({
         status: 200,
@@ -273,13 +276,19 @@ describe("get_lot", () => {
     }
   });
 
-  it("accepts an end_time with an offset", async () => {
-    handlers["GET /map-bid/ddb/lot/5"] = () => ({
-      status: 200,
-      json: { lot_id: 5, end_time: "2026-11-16T19:35:59-05:00" },
-    });
+  it("accepts an end_time with an offset, or on a leap day", async () => {
     const api = await signedInClient();
-    assert.equal((await api.get_lot(5)).end_time, "2026-11-16T19:35:59-05:00");
+    for (const end_time of [
+      "2026-11-16T19:35:59-05:00",
+      "2026-11-17T06:05:59+05:30",
+      "2028-02-29T23:59:59.999Z",
+    ]) {
+      handlers["GET /map-bid/ddb/lot/5"] = () => ({
+        status: 200,
+        json: { lot_id: 5, end_time },
+      });
+      assert.equal((await api.get_lot(5)).end_time, end_time);
+    }
   });
 
   it("needs a login", async () => {
