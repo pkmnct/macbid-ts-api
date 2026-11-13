@@ -30,6 +30,13 @@ export interface WatchlistFull {
   auction_id: number;
   closed_date: null;
   buyers_assurance_cost: number | null;
+  /**
+   * Not a UTC instant: wall-clock digits marked "Z", sent as an ISO string
+   * (the `Date` type is historical). They have not matched the time the site
+   * shows (in November 2026 they were an hour ahead of Eastern time; the
+   * offset in summer is unknown) and they do not follow bid extensions. For
+   * the real close time use `get_lot(auction_lot_id)` and its `end_time`.
+   */
   expected_close_date: Date;
   inventory_id: number;
   date_created: Date;
@@ -58,6 +65,36 @@ export interface WatchlistFull {
   category: null | string;
   image_url: string;
   auction_type: AuctionType;
+}
+
+/**
+ * A lot's live bidding state, the data behind the countdown on its page. The
+ * times are real UTC instants. Mac.Bid sends most numbers here as strings,
+ * unlike the watchlist: compare ids with `Number(...)`. Only `end_time` is
+ * checked; the other fields are as Mac.Bid sent them.
+ */
+export interface LotStatus {
+  /** The watchlist's `auction_lot_id`. */
+  lot_id: number;
+  lot_number: string;
+  /** A string here; `WatchlistFull.auction_id` is a number. */
+  auction_id: string;
+  location_id: string;
+  title: string;
+  status: string;
+  is_open: boolean;
+  /** When bidding ends, moved later when a late bid extends it. */
+  end_time: string;
+  /** Bids after this instant extend `end_time`. */
+  extension_window?: string;
+  date_launched?: string;
+  last_updated?: string;
+  last_bid_time?: string;
+  current_bid?: string;
+  total_bids?: string;
+  instant_win_price: number | null;
+  watchers_count?: number;
+  stock_image_url?: string;
 }
 
 export enum AuctionType {
@@ -209,6 +246,54 @@ export class MacBidAuthError extends Error {
     this.status = options.status;
   }
 }
+
+/**
+ * `get_lot` got a 404: Mac.Bid has no such lot (removed, or a wrong id). The
+ * session is unaffected. Other calls throw a plain Error on 404, since there
+ * it more likely means the endpoint moved. A 404 for every lot means the same.
+ */
+export class MacBidNotFoundError extends Error {
+  override name = "MacBidNotFoundError";
+  /** The path that was not found. */
+  path: string;
+
+  constructor(message: string, options: ErrorOptions & { path: string }) {
+    super(message, options);
+    this.path = options.path;
+  }
+}
+
+/** An ISO 8601 date-time with a zone, such as 2026-11-17T00:35:59.000Z. */
+const ISO_INSTANT =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+/**
+ * Whether `value` is an ISO 8601 date-time with a zone that names a real
+ * moment. Date.parse alone accepts junk such as "0Z", reads a time without a
+ * zone as local time, and rolls impossible dates over (31 February to
+ * 3 March, 24:00 to the next day): the digits must survive the round trip.
+ */
+const isIsoInstant = (value: string): boolean => {
+  const match = ISO_INSTANT.exec(value);
+  const ms = Date.parse(value);
+  if (!match || Number.isNaN(ms)) {
+    return false;
+  }
+  const [, year, month, day, hour, minute, second, sign, offH, offM] = match;
+  const offsetMinutes = sign
+    ? (sign === "-" ? -1 : 1) * (Number(offH) * 60 + Number(offM))
+    : 0;
+  // The instant as the clock in the value's own zone shows it
+  const shown = new Date(ms + offsetMinutes * 60_000);
+  return (
+    shown.getUTCFullYear() === Number(year) &&
+    shown.getUTCMonth() + 1 === Number(month) &&
+    shown.getUTCDate() === Number(day) &&
+    shown.getUTCHours() === Number(hour) &&
+    shown.getUTCMinutes() === Number(minute) &&
+    shown.getUTCSeconds() === Number(second)
+  );
+};
 
 /** Parse a Retry-After header: delay in seconds, or an HTTP date. */
 const parseRetryAfter = (value: string | null): number | undefined => {
@@ -466,7 +551,14 @@ export class MacBid {
   /** GET a path that needs a login and fail clearly if Mac.Bid refuses it. */
   private getJson = async <T>(
     path: string,
-    { userSpecific = true }: { userSpecific?: boolean } = {}
+    {
+      userSpecific = true,
+      notFound = false,
+    }: {
+      userSpecific?: boolean;
+      /** Raise MacBidNotFoundError on 404, for a path that names one item. */
+      notFound?: boolean;
+    } = {}
   ): Promise<T> => {
     if (userSpecific) {
       this.check_auth();
@@ -510,6 +602,11 @@ export class MacBid {
         `Mac.Bid rejected the session (HTTP ${res.status}) for ${path}`,
         { status: res.status }
       );
+    }
+    if (notFound && res.status === 404) {
+      throw new MacBidNotFoundError(`Mac.Bid returned HTTP 404 for ${path}`, {
+        path,
+      });
     }
     if (!res.ok) {
       throw new Error(`Mac.Bid returned HTTP ${res.status} for ${path}`);
@@ -907,6 +1004,33 @@ export class MacBid {
       );
     }
     return body.watchlist_full;
+  };
+
+  /**
+   * Returns a lot's live bidding state, including `end_time`: when bidding
+   * really ends, as a UTC instant. Needs a login. `lotId` is the lot's numeric
+   * id (`auction_lot_id` in the watchlist), not its lot number such as "2230R".
+   * Throws `MacBidNotFoundError` when Mac.Bid has no such lot. Each call is
+   * one request: for many lots, limit how many run at once.
+   */
+  public get_lot = async (lotId: number | string): Promise<LotStatus> => {
+    const id = String(lotId);
+    if (!/^[1-9]\d*$/.test(id)) {
+      throw new Error(`Not a Mac.Bid lot id: ${id}`);
+    }
+    const body = await this.getJson<unknown>(`/map-bid/ddb/lot/${id}`, {
+      notFound: true,
+    });
+    const endTime =
+      typeof body === "object" && body !== null && !Array.isArray(body)
+        ? (body as { end_time?: unknown }).end_time
+        : undefined;
+    if (typeof endTime !== "string" || !isIsoInstant(endTime)) {
+      throw new Error(
+        "Mac.Bid lot response has no usable end_time; the API may have changed"
+      );
+    }
+    return body as LotStatus;
   };
 
   /**

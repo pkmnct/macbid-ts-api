@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, afterEach, before, describe, it } from "node:test";
-import MacBid, { MacBidAuthError, MacBidUnavailableError } from "./MacBid.js";
+import MacBid, {
+  MacBidAuthError,
+  MacBidNotFoundError,
+  MacBidUnavailableError,
+} from "./MacBid.js";
 
 type Handler = (
   req: http.IncomingMessage,
@@ -200,6 +204,164 @@ describe("watchlist", () => {
     });
     const api = await signedInClient();
     await assert.rejects(api.get_watchlist(), /not a list/);
+  });
+});
+
+describe("get_lot", () => {
+  // Lot 2230R as Mac.Bid sent it on 13 November 2026, trimmed
+  const lot = {
+    lot_id: 67826120,
+    lot_number: "2230R",
+    auction_id: "101336",
+    location_id: "25",
+    title: "Magnet Maker Machine Kit",
+    status: "LIVE",
+    is_open: true,
+    end_time: "2026-11-17T00:35:59.000Z",
+    extension_window: "2026-11-17T00:33:59.000Z",
+    current_bid: "130",
+    total_bids: "33",
+    instant_win_price: null,
+  };
+
+  it("returns the lot's live state with the session token", async () => {
+    let authorization: string | undefined;
+    handlers["GET /map-bid/ddb/lot/67826120"] = (req) => {
+      authorization = req.headers.authorization;
+      return { status: 200, json: lot };
+    };
+    const api = await signedInClient();
+    assert.deepEqual(await api.get_lot(67826120), lot);
+    assert.equal((await api.get_lot("67826120")).end_time, lot.end_time);
+    assert.equal(authorization, "old");
+  });
+
+  it("refuses an id that is not a plain number, without a request", async () => {
+    const api = await signedInClient();
+    for (const bad of ["2230R", "../user/me", "0", "", "1.5", -3]) {
+      await assert.rejects(api.get_lot(bad), /Not a Mac.Bid lot id/);
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  it("fails when end_time is missing or not an instant", async () => {
+    const api = await signedInClient();
+    for (const end_time of [
+      undefined,
+      null,
+      "",
+      "null",
+      "2026-11-16 19:35:59", // no zone: would be read as local time
+      "2026-11-16T19:35:59", // the same, ISO style
+      "not a dateZ",
+      "0Z", // Date.parse: 1 January 2000
+      "-1000", // Date.parse: the year 1000, local time
+      "Nov 17 2026 00:35:59 -0500",
+      "2026-11-17T00:35:59z",
+      "2026-11-17T00:35:59+0000",
+      "2026-13-45T99:99:99Z", // the right shape, but not a date
+      "2026-02-31T00:00:00Z", // Date.parse: 3 March
+      "2026-11-17T24:00:00Z", // Date.parse: midnight on the 18th
+      "2026-11-16T19:35:60-05:00",
+    ]) {
+      handlers["GET /map-bid/ddb/lot/5"] = () => ({
+        status: 200,
+        json: { lot_id: 5, end_time },
+      });
+      await assert.rejects(api.get_lot(5), /no usable end_time/, String(end_time));
+    }
+    for (const json of [null, [], "x"]) {
+      handlers["GET /map-bid/ddb/lot/5"] = () => ({ status: 200, json });
+      await assert.rejects(api.get_lot(5), /no usable end_time/);
+    }
+  });
+
+  it("accepts an end_time with an offset, or on a leap day", async () => {
+    const api = await signedInClient();
+    for (const end_time of [
+      "2026-11-16T19:35:59-05:00",
+      "2026-11-17T06:05:59+05:30",
+      "2028-02-29T23:59:59.999Z",
+    ]) {
+      handlers["GET /map-bid/ddb/lot/5"] = () => ({
+        status: 200,
+        json: { lot_id: 5, end_time },
+      });
+      assert.equal((await api.get_lot(5)).end_time, end_time);
+    }
+  });
+
+  it("needs a login", async () => {
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await assert.rejects(api.get_lot(5), /Not authenticated/);
+    assert.equal(count("GET /map-bid/ddb/lot/5"), 0);
+  });
+
+  it("raises MacBidNotFoundError for a lot that is gone, keeping the session", async () => {
+    handlers["GET /map-bid/ddb/lot/5"] = () => ({
+      status: 404,
+      json: { message: "Not Found" },
+    });
+    const api = await signedInClient();
+    await assert.rejects(api.get_lot(5), (error: unknown) => {
+      assert.ok(error instanceof MacBidNotFoundError);
+      assert.equal(error.path, "/map-bid/ddb/lot/5");
+      assert.match(error.message, /HTTP 404/);
+      return true;
+    });
+    assert.equal(api.getAuthState().token, "old");
+  });
+
+  it("leaves a 404 from the other calls a plain Error (the endpoint may have moved)", async () => {
+    const api = await signedInClient();
+    const endpoints: [string, () => Promise<unknown>][] = [
+      ["GET /auctions/customer/7/active-auctions", api.get_watchlist],
+      ["GET /user/7/active", api.get_active],
+      ["GET /buildings", api.get_buildings],
+      ["GET /locations", api.get_locations],
+    ];
+    for (const [key, call] of endpoints) {
+      handlers[key] = () => ({ status: 404, json: { message: "Not Found" } });
+      await assert.rejects(call(), (error: unknown) => {
+        assert.ok(!(error instanceof MacBidNotFoundError), key);
+        assert.match((error as Error).message, /HTTP 404/);
+        return true;
+      });
+    }
+  });
+
+  it("throws a plain Error for other HTTP errors", async () => {
+    handlers["GET /map-bid/ddb/lot/5"] = () => ({ status: 418, json: {} });
+    const api = await signedInClient();
+    await assert.rejects(api.get_lot(5), (error: unknown) => {
+      assert.ok(!(error instanceof MacBidNotFoundError));
+      assert.match((error as Error).message, /HTTP 418/);
+      return true;
+    });
+  });
+
+  it("refreshes once on a rejected token and retries", async () => {
+    handlers["GET /map-bid/ddb/lot/67826120"] = (req) =>
+      req.headers.authorization === "new"
+        ? { status: 200, json: lot }
+        : { status: 401, json: { message: "Unauthorized" } };
+    handlers["PUT /auth/refresh-token"] = refreshOk;
+    const api = await signedInClient();
+    assert.equal((await api.get_lot(67826120)).end_time, lot.end_time);
+    assert.equal(count("PUT /auth/refresh-token"), 1);
+    assert.equal(count("GET /map-bid/ddb/lot/67826120"), 2);
+  });
+
+  it("raises MacBidAuthError and drops the session when the retry is refused too", async () => {
+    handlers["GET /map-bid/ddb/lot/5"] = () => ({
+      status: 401,
+      json: { message: "Unauthorized" },
+    });
+    handlers["PUT /auth/refresh-token"] = refreshOk;
+    const api = await signedInClient();
+    await assert.rejects(api.get_lot(5), MacBidAuthError);
+    assert.equal(api.getAuthState().token, undefined);
   });
 });
 

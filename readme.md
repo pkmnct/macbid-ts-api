@@ -69,10 +69,17 @@ For JSON storage, use `MacBid.serializeAuthState` / `MacBid.parseAuthState`.
 
 - `MacBidUnavailableError`: Mac.Bid could not be reached, timed out, or answered with a 5xx or 429 (`retryAfterMs` is set when it sent `Retry-After`). The session is unaffected: keep the saved state and retry later.
 - `MacBidAuthError`: Mac.Bid refused the session (`status` is 400, 401 or 403), for example after the password was changed or the session was revoked, or when it refused the refresh token. The client has already dropped the tokens: discard the saved state and sign in again. Before raising it for a rejected data request, the client refreshes the access token once and retries, and parallel calls share that one refresh. `get_buildings` and `get_locations` never raise it: they do not depend on the user's session.
+- `MacBidNotFoundError`: `get_lot` got a 404 (`path` says for what): no such lot, for example one that was removed. The session is unaffected. Other calls throw a plain `Error` on 404, since there it more likely means the endpoint moved.
 
 Other errors mean the request or response was not what the client expected.
 
 `get_watchlist` returns `[]` when the response has no `watchlist_full` (an account with nothing on its watchlist) and logs a warning once per client; a `watchlist_full` that is not a list throws.
+
+### Close times
+
+A watchlist item's `expected_close_date` is not a UTC instant: it is wall-clock digits marked "Z". In the watchlist response they have not matched the time the site shows (in November 2026 they were an hour ahead of Eastern time; the summer offset is unknown), and they stay at the scheduled close when a late bid extends the lot. For the real close, use `get_lot(item.auction_lot_id)` and its `end_time`.
+
+`get_lot` is one request per lot. For a long watchlist, run a few at a time rather than all at once: a burst can get a 429 (`MacBidUnavailableError`). A lot that no longer exists throws `MacBidNotFoundError`, so you can skip that one item; but if every lot throws it, the endpoint has likely moved, and that should fail loudly rather than be skipped. `LotStatus` sends most numbers as strings (`auction_id: "101336"`), unlike the watchlist, so compare ids with `Number(...)`.
 
 ### Starting a sign-in over
 
@@ -98,6 +105,7 @@ try {
 |---|---|
 | `authenticate(params?)` | Log in or refresh session; returns persistable state |
 | `get_watchlist()` | Active watchlist items |
+| `get_lot(lotId)` | A lot's live bidding state, with `end_time`: when bidding really ends, as a UTC instant, moved later by bid extensions. `lotId` is the numeric `auction_lot_id`. Needs a login |
 | `get_active()` | Active won items (e.g. awaiting pickup) |
 | `get_buildings()` | Warehouse buildings |
 | `get_locations()` | Pickup locations |
