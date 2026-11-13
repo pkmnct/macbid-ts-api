@@ -203,6 +203,69 @@ describe("watchlist", () => {
   });
 });
 
+describe("get_lot", () => {
+  // Lot 2230R as Mac.Bid sent it on 13 November 2026, trimmed
+  const lot = {
+    lot_id: 67826120,
+    lot_number: "2230R",
+    auction_id: "101336",
+    location_id: "25",
+    title: "Magnet Maker Machine Kit",
+    status: "LIVE",
+    is_open: true,
+    end_time: "2026-11-17T00:35:59.000Z",
+    extension_window: "2026-11-17T00:33:59.000Z",
+    current_bid: "130",
+    total_bids: "33",
+    instant_win_price: null,
+  };
+
+  it("returns the lot's live state with the session token", async () => {
+    let authorization: string | undefined;
+    handlers["GET /map-bid/ddb/lot/67826120"] = (req) => {
+      authorization = req.headers.authorization;
+      return { status: 200, json: lot };
+    };
+    const api = await signedInClient();
+    assert.deepEqual(await api.get_lot(67826120), lot);
+    assert.equal((await api.get_lot("67826120")).end_time, lot.end_time);
+    assert.equal(authorization, "old");
+  });
+
+  it("refuses an id that is not a plain number, without a request", async () => {
+    const api = await signedInClient();
+    for (const bad of ["2230R", "../user/me", "0", "", "1.5", -3]) {
+      await assert.rejects(api.get_lot(bad), /Not a Mac.Bid lot id/);
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  it("fails when the answer has no end_time", async () => {
+    handlers["GET /map-bid/ddb/lot/5"] = () => ({
+      status: 200,
+      json: { lot_id: 5 },
+    });
+    const api = await signedInClient();
+    await assert.rejects(api.get_lot(5), /no end_time/);
+  });
+
+  it("needs a login", async () => {
+    const api = new MacBid();
+    api.API_ROOT = root;
+    await assert.rejects(api.get_lot(5), /Not authenticated/);
+    assert.equal(count("GET /map-bid/ddb/lot/5"), 0);
+  });
+
+  it("throws on an HTTP error instead of returning it", async () => {
+    handlers["GET /map-bid/ddb/lot/5"] = () => ({
+      status: 404,
+      json: { message: "Not Found" },
+    });
+    const api = await signedInClient();
+    await assert.rejects(api.get_lot(5), /HTTP 404/);
+  });
+});
+
 describe("sign-in", () => {
   const loginHandlers = () => {
     handlers["POST /auth/auth-validation"] = () => ({

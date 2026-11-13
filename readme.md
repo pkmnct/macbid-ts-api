@@ -72,6 +72,10 @@ For JSON storage, use `MacBid.serializeAuthState` / `MacBid.parseAuthState`.
 
 Other errors mean the request or response was not what the client expected.
 
+### Close times
+
+A watchlist item's `expected_close_date` is not a UTC instant: it is wall-clock digits marked "Z", and in the watchlist response they have been an hour ahead of the Eastern time the site shows. It also stays at the scheduled close when a late bid extends the lot. For the real close, use `get_lot(item.auction_lot_id)` and its `end_time`.
+
 `get_watchlist` returns `[]` when the response has no `watchlist_full` (an account with nothing on its watchlist) and logs a warning once per client; a `watchlist_full` that is not a list throws.
 
 ### Starting a sign-in over
@@ -98,6 +102,7 @@ try {
 |---|---|
 | `authenticate(params?)` | Log in or refresh session; returns persistable state |
 | `get_watchlist()` | Active watchlist items |
+| `get_lot(lotId)` | A lot's live bidding state, with `end_time`: when bidding really ends, as a UTC instant, moved later by bid extensions. `lotId` is the numeric `auction_lot_id`. Needs a login |
 | `get_active()` | Active won items (e.g. awaiting pickup) |
 | `get_buildings()` | Warehouse buildings |
 | `get_locations()` | Pickup locations |

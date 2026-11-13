@@ -30,6 +30,12 @@ export interface WatchlistFull {
   auction_id: number;
   closed_date: null;
   buyers_assurance_cost: number | null;
+  /**
+   * The scheduled close as Mac.Bid's wall-clock digits marked "Z", not a UTC
+   * instant. In this endpoint they have been seen an hour ahead of the Eastern
+   * time the site shows (in November), and they do not follow bid extensions.
+   * For the real close time use `get_lot(auction_lot_id)` and its `end_time`.
+   */
   expected_close_date: Date;
   inventory_id: number;
   date_created: Date;
@@ -58,6 +64,32 @@ export interface WatchlistFull {
   category: null | string;
   image_url: string;
   auction_type: AuctionType;
+}
+
+/**
+ * A lot's live bidding state, the data behind the countdown on its page. The
+ * times are real UTC instants. Mac.Bid sends most numbers here as strings.
+ */
+export interface LotStatus {
+  lot_id: number;
+  lot_number: string;
+  auction_id: string;
+  location_id: string;
+  title: string;
+  status: string;
+  is_open: boolean;
+  /** When bidding ends, moved later when a late bid extends it. */
+  end_time: string;
+  /** Bids after this instant extend `end_time`. */
+  extension_window?: string;
+  date_launched?: string;
+  last_updated?: string;
+  last_bid_time?: string;
+  current_bid?: string;
+  total_bids?: string;
+  instant_win_price: number | null;
+  watchers_count?: number;
+  stock_image_url?: string;
 }
 
 export enum AuctionType {
@@ -907,6 +939,30 @@ export class MacBid {
       );
     }
     return body.watchlist_full;
+  };
+
+  /**
+   * Returns a lot's live bidding state, including `end_time`: when bidding
+   * really ends, as a UTC instant. Needs a login. `lotId` is the lot's numeric
+   * id (`auction_lot_id` in the watchlist), not its lot number such as "2230R".
+   */
+  public get_lot = async (lotId: number | string): Promise<LotStatus> => {
+    const id = String(lotId);
+    if (!/^[1-9]\d*$/.test(id)) {
+      throw new Error(`Not a Mac.Bid lot id: ${id}`);
+    }
+    const body = await this.getJson<unknown>(`/map-bid/ddb/lot/${id}`);
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      Array.isArray(body) ||
+      typeof (body as { end_time?: unknown }).end_time !== "string"
+    ) {
+      throw new Error(
+        "Mac.Bid lot response has no end_time; the API may have changed"
+      );
+    }
+    return body as LotStatus;
   };
 
   /**
